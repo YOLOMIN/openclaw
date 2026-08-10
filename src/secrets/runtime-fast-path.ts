@@ -1,21 +1,21 @@
+/** Detects when secrets runtime preparation can safely use a fast path. */
 import { existsSync } from "node:fs";
-import path from "node:path";
+import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import {
   listAgentIds,
   resolveAgentDir,
   resolveDefaultAgentDir,
 } from "../agents/agent-scope-config.js";
-import {
-  AUTH_PROFILE_FILENAME,
-  AUTH_STATE_FILENAME,
-  LEGACY_AUTH_FILENAME,
-} from "../agents/auth-profiles/path-constants.js";
+import { getRuntimeAuthProfileStoreCredentialsRevision } from "../agents/auth-profiles/runtime-snapshots.js";
+import { resolveSharedMainAuthAgentDir } from "../agents/auth-profiles/shared-main-dir.js";
+import { resolveAuthProfileDatabasePath } from "../agents/auth-profiles/sqlite.js";
 import type { AuthProfileStore } from "../agents/auth-profiles/types.js";
-import { resolveOAuthPath } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { coerceSecretRef } from "../config/types.secrets.js";
+import type { PluginManifestRegistry } from "../plugins/manifest-registry.js";
 import type { PluginOrigin } from "../plugins/plugin-origin.types.js";
 import { resolveUserPath } from "../utils.js";
+import { hasCredentialBearingObjectValue, hasSecretRefCandidate } from "./runtime-secret-scan.js";
+import type { SecretDefaults } from "./runtime-shared.js";
 import type {
   PreparedSecretsRuntimeSnapshot,
   SecretsRuntimeRefreshContext,
@@ -31,10 +31,11 @@ const RUNTIME_PATH_ENV_KEYS = [
   "OPENCLAW_STATE_DIR",
   "OPENCLAW_CONFIG_PATH",
   "OPENCLAW_AGENT_DIR",
-  "PI_CODING_AGENT_DIR",
-  "OPENCLAW_TEST_FAST",
 ] as const;
 
+/**
+ * Merges caller env with process path env needed for config and agent-dir resolution.
+ */
 export function mergeSecretsRuntimeEnv(
   env: NodeJS.ProcessEnv | Record<string, string | undefined> | undefined,
 ): Record<string, string | undefined> {
@@ -43,6 +44,7 @@ export function mergeSecretsRuntimeEnv(
     if (merged[key] !== undefined) {
       continue;
     }
+    // Tests often pass narrow env objects; path resolution still needs host path variables.
     const processValue = process.env[key];
     if (processValue !== undefined) {
       merged[key] = processValue;
@@ -51,6 +53,9 @@ export function mergeSecretsRuntimeEnv(
   return merged;
 }
 
+/**
+ * Collects default and named agent directories that may contain auth profile stores.
+ */
 export function collectCandidateAgentDirs(
   config: OpenClawConfig,
   env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
@@ -63,6 +68,9 @@ export function collectCandidateAgentDirs(
   return [...dirs];
 }
 
+/**
+ * Combines explicit refresh agent dirs with config-derived dirs for runtime refresh.
+ */
 export function resolveRefreshAgentDirs(
   config: OpenClawConfig,
   context: SecretsRuntimeRefreshContext,
@@ -71,7 +79,7 @@ export function resolveRefreshAgentDirs(
   if (!context.explicitAgentDirs || context.explicitAgentDirs.length === 0) {
     return configDerived;
   }
-  return [...new Set([...context.explicitAgentDirs, ...configDerived])];
+  return uniqueStrings([...context.explicitAgentDirs, ...configDerived]);
 }
 
 function resolveCandidateAgentDirs(params: {
@@ -80,32 +88,33 @@ function resolveCandidateAgentDirs(params: {
   agentDirs?: string[];
 }): string[] {
   return params.agentDirs?.length
-    ? [...new Set(params.agentDirs.map((entry) => resolveUserPath(entry, params.env)))]
+    ? uniqueStrings(params.agentDirs.map((entry) => resolveUserPath(entry, params.env)))
     : collectCandidateAgentDirs(params.config, params.env);
 }
 
 function hasCandidateAuthProfileStoreSource(agentDir: string): boolean {
-  return (
-    existsSync(path.join(agentDir, AUTH_PROFILE_FILENAME)) ||
-    existsSync(path.join(agentDir, AUTH_STATE_FILENAME)) ||
-    existsSync(path.join(agentDir, LEGACY_AUTH_FILENAME))
-  );
+  return existsSync(resolveAuthProfileDatabasePath(agentDir));
 }
 
-export function hasCandidateAuthProfileStoreSources(params: {
+/**
+ * Returns whether canonical auth-profile databases exist for candidate agent dirs.
+ */
+function hasCandidateAuthProfileStoreSources(params: {
   config: OpenClawConfig;
   env: NodeJS.ProcessEnv | Record<string, string | undefined>;
   agentDirs?: string[];
 }): boolean {
   const candidateDirs = resolveCandidateAgentDirs(params);
-  const mainAgentDir = resolveUserPath(resolveDefaultAgentDir({}, params.env), params.env);
+  const mainAgentDir = resolveSharedMainAuthAgentDir(params.env as NodeJS.ProcessEnv);
   return (
     candidateDirs.some((agentDir) => hasCandidateAuthProfileStoreSource(agentDir)) ||
-    hasCandidateAuthProfileStoreSource(mainAgentDir) ||
-    existsSync(resolveOAuthPath(params.env as NodeJS.ProcessEnv))
+    hasCandidateAuthProfileStoreSource(mainAgentDir)
   );
 }
 
+/**
+ * Creates empty web-tool metadata for snapshots that do not need secret resolution.
+ */
 export function createEmptyRuntimeWebToolsMetadata(): RuntimeWebToolsMetadata {
   return {
     search: {
@@ -120,38 +129,9 @@ export function createEmptyRuntimeWebToolsMetadata(): RuntimeWebToolsMetadata {
   };
 }
 
-const WEB_FETCH_CREDENTIAL_FIELD_NAMES = new Set(["apikey", "key", "token", "secret", "password"]);
-
-function hasCredentialBearingWebFetchValue(
-  value: unknown,
-  defaults: Parameters<typeof coerceSecretRef>[1],
-  seen = new WeakSet<object>(),
-): boolean {
-  if (coerceSecretRef(value, defaults)) {
-    return true;
-  }
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  if (seen.has(value)) {
-    return false;
-  }
-  seen.add(value);
-  if (Array.isArray(value)) {
-    return value.some((entry) => hasCredentialBearingWebFetchValue(entry, defaults, seen));
-  }
-  return Object.entries(value as Record<string, unknown>).some(([rawKey, entry]) => {
-    const key = rawKey.toLowerCase();
-    if (WEB_FETCH_CREDENTIAL_FIELD_NAMES.has(key) && entry != null && entry !== "") {
-      return true;
-    }
-    return hasCredentialBearingWebFetchValue(entry, defaults, seen);
-  });
-}
-
 function hasActiveRuntimeWebFetchProviderSurface(
   fetch: unknown,
-  defaults: Parameters<typeof coerceSecretRef>[1],
+  defaults: SecretDefaults | undefined,
 ): boolean {
   if (!fetch || typeof fetch !== "object" || Array.isArray(fetch)) {
     return false;
@@ -163,7 +143,7 @@ function hasActiveRuntimeWebFetchProviderSurface(
   if (typeof fetchConfig.provider === "string" && fetchConfig.provider.trim()) {
     return true;
   }
-  return hasCredentialBearingWebFetchValue(fetchConfig, defaults);
+  return hasCredentialBearingObjectValue(fetchConfig, defaults);
 }
 
 function hasRuntimeWebToolConfigSurface(config: OpenClawConfig): boolean {
@@ -177,7 +157,7 @@ function hasRuntimeWebToolConfigSurface(config: OpenClawConfig): boolean {
     (web as { fetch?: { enabled?: unknown } }).fetch?.enabled === false;
   if (web && typeof web === "object" && !Array.isArray(web)) {
     const webRecord = web as Record<string, unknown>;
-    if ("search" in webRecord || "x_search" in webRecord) {
+    if ("search" in webRecord) {
       return true;
     }
     if (
@@ -197,7 +177,7 @@ function hasRuntimeWebToolConfigSurface(config: OpenClawConfig): boolean {
     }
     const pluginConfig = (entry as { config?: unknown }).config;
     return (
-      !!pluginConfig &&
+      pluginConfig !== null &&
       typeof pluginConfig === "object" &&
       !Array.isArray(pluginConfig) &&
       ("webSearch" in pluginConfig || (!fetchExplicitlyDisabled && "webFetch" in pluginConfig))
@@ -205,29 +185,10 @@ function hasRuntimeWebToolConfigSurface(config: OpenClawConfig): boolean {
   });
 }
 
-function hasSecretRefCandidate(
-  value: unknown,
-  defaults: Parameters<typeof coerceSecretRef>[1],
-  seen = new WeakSet<object>(),
-): boolean {
-  if (coerceSecretRef(value, defaults)) {
-    return true;
-  }
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  if (seen.has(value)) {
-    return false;
-  }
-  seen.add(value);
-  if (Array.isArray(value)) {
-    return value.some((entry) => hasSecretRefCandidate(entry, defaults, seen));
-  }
-  return Object.values(value as Record<string, unknown>).some((entry) =>
-    hasSecretRefCandidate(entry, defaults, seen),
-  );
-}
-
+/**
+ * Returns whether a snapshot can skip full SecretRef/web-tool resolution.
+ */
+/** Returns whether current config/auth/plugin state allows skipping full secret preparation. */
 export function canUseSecretsRuntimeFastPath(params: {
   sourceConfig: OpenClawConfig;
   authStores: Array<{ agentDir: string; store: AuthProfileStore }>;
@@ -242,6 +203,9 @@ export function canUseSecretsRuntimeFastPath(params: {
   return !params.authStores.some((entry) => hasSecretRefCandidate(entry.store, defaults));
 }
 
+/**
+ * Prepares a runtime snapshot without resolving refs when config and auth stores contain none.
+ */
 export function prepareSecretsRuntimeFastPathSnapshot(params: {
   config: OpenClawConfig;
   env?: NodeJS.ProcessEnv;
@@ -249,12 +213,14 @@ export function prepareSecretsRuntimeFastPathSnapshot(params: {
   includeAuthStoreRefs?: boolean;
   loadAuthStore?: (agentDir?: string) => AuthProfileStore;
   loadablePluginOrigins?: ReadonlyMap<string, PluginOrigin>;
+  manifestRegistry?: Pick<PluginManifestRegistry, "plugins">;
 }): {
   snapshot: PreparedSecretsRuntimeSnapshot;
   refreshContext: SecretsRuntimeRefreshContext;
   usesAuthStoreFallback: boolean;
 } | null {
   const runtimeEnv = mergeSecretsRuntimeEnv(params.env);
+  const authStoreCredentialsRevision = getRuntimeAuthProfileStoreCredentialsRevision();
   const sourceConfig = structuredClone(params.config);
   const resolvedConfig = structuredClone(params.config);
   const includeAuthStoreRefs = params.includeAuthStoreRefs ?? true;
@@ -294,7 +260,10 @@ export function prepareSecretsRuntimeFastPathSnapshot(params: {
     sourceConfig,
     config: resolvedConfig,
     authStores,
+    authStoreCredentialsRevision,
     warnings: [],
+    degradedOwners: [],
+    secretOwners: [],
     webTools: createEmptyRuntimeWebToolsMetadata(),
   };
   return {
@@ -305,6 +274,7 @@ export function prepareSecretsRuntimeFastPathSnapshot(params: {
       explicitAgentDirs: params.agentDirs?.length ? [...candidateDirs] : null,
       includeAuthStoreRefs,
       loadablePluginOrigins: params.loadablePluginOrigins ?? new Map<string, PluginOrigin>(),
+      ...(params.manifestRegistry ? { manifestRegistry: params.manifestRegistry } : {}),
       ...(params.loadAuthStore ? { loadAuthStore: params.loadAuthStore } : {}),
     },
   };

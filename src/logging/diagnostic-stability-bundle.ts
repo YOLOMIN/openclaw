@@ -1,13 +1,18 @@
+// Diagnostic stability bundle helpers collect stable diagnostic data for comparison.
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import v8 from "node:v8";
+import { expectDefined } from "@openclaw/normalization-core";
+import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { resolveStateDir } from "../config/paths.js";
 import type {
   DiagnosticMemoryPressureEvent,
   DiagnosticMemoryUsage,
 } from "../infra/diagnostic-events.js";
+import { isMissingPathError } from "../infra/errors.js";
 import { registerFatalErrorHook } from "../infra/fatal-error-hooks.js";
+import { parseStrictNonNegativeInteger } from "../infra/parse-finite-number.js";
 import { replaceFileAtomicSync } from "../infra/replace-file.js";
 import {
   getDiagnosticStabilitySnapshot,
@@ -17,8 +22,8 @@ import {
 import { redactSensitiveText } from "./redact.js";
 
 export const DIAGNOSTIC_STABILITY_BUNDLE_VERSION = 1;
-export const DEFAULT_DIAGNOSTIC_STABILITY_BUNDLE_LIMIT = MAX_DIAGNOSTIC_STABILITY_LIMIT;
-export const DEFAULT_DIAGNOSTIC_STABILITY_BUNDLE_RETENTION = 20;
+const DEFAULT_DIAGNOSTIC_STABILITY_BUNDLE_LIMIT = MAX_DIAGNOSTIC_STABILITY_LIMIT;
+const DEFAULT_DIAGNOSTIC_STABILITY_BUNDLE_RETENTION = 20;
 export const MAX_DIAGNOSTIC_STABILITY_BUNDLE_BYTES = 5 * 1024 * 1024;
 
 const SAFE_REASON_CODE = /^[A-Za-z0-9_.:-]{1,120}$/u;
@@ -69,7 +74,7 @@ type DiagnosticSessionFileSummary = {
   mtimeMs: number;
 };
 
-export type DiagnosticMemoryPressureBundleEvidence = {
+type DiagnosticMemoryPressureBundleEvidence = {
   level: DiagnosticMemoryPressureEvent["level"];
   reason: DiagnosticMemoryPressureEvent["reason"];
   memory: DiagnosticMemoryUsage;
@@ -83,7 +88,7 @@ export type DiagnosticMemoryPressureBundleEvidence = {
   topSessionFiles?: DiagnosticSessionFileSummary[];
 };
 
-export type DiagnosticStabilityBundleEvidence = {
+type DiagnosticStabilityBundleEvidence = {
   memoryPressure?: DiagnosticMemoryPressureBundleEvidence;
 };
 
@@ -110,12 +115,12 @@ export type DiagnosticStabilityBundle = {
   snapshot: DiagnosticStabilitySnapshot;
 };
 
-export type WriteDiagnosticStabilityBundleResult =
+type WriteDiagnosticStabilityBundleResult =
   | { status: "written"; path: string; bundle: DiagnosticStabilityBundle }
   | { status: "skipped"; reason: "empty" }
   | { status: "failed"; error: unknown };
 
-export type WriteDiagnosticStabilityBundleOptions = {
+type WriteDiagnosticStabilityBundleOptions = {
   reason: string;
   error?: unknown;
   includeEmpty?: boolean;
@@ -127,12 +132,12 @@ export type WriteDiagnosticStabilityBundleOptions = {
   evidence?: DiagnosticStabilityBundleEvidence;
 };
 
-export type DiagnosticStabilityBundleLocationOptions = {
+type DiagnosticStabilityBundleLocationOptions = {
   env?: NodeJS.ProcessEnv;
   stateDir?: string;
 };
 
-export type DiagnosticStabilityBundleFile = {
+type DiagnosticStabilityBundleFile = {
   path: string;
   mtimeMs: number;
 };
@@ -142,17 +147,17 @@ export type ReadDiagnosticStabilityBundleResult =
   | { status: "missing"; dir: string }
   | { status: "failed"; path?: string; error: unknown };
 
-export type DiagnosticStabilityBundleFailureWriteOutcome =
+type DiagnosticStabilityBundleFailureWriteOutcome =
   | { status: "written"; message: string; path: string }
   | { status: "failed"; message: string; error: unknown }
   | { status: "skipped"; reason: "empty" };
 
-export type WriteDiagnosticStabilityBundleForFailureOptions = Omit<
+type WriteDiagnosticStabilityBundleForFailureOptions = Omit<
   WriteDiagnosticStabilityBundleOptions,
   "error" | "includeEmpty" | "reason"
 >;
 
-export type WriteDiagnosticMemoryPressureBundleOptions = Omit<
+type WriteDiagnosticMemoryPressureBundleOptions = Omit<
   WriteDiagnosticStabilityBundleOptions,
   "reason" | "error" | "evidence" | "includeEmpty"
 > & {
@@ -205,7 +210,7 @@ function readErrorMessage(error: unknown): string | undefined {
     return undefined;
   }
   return sanitized.length > MAX_SAFE_ERROR_MESSAGE_LENGTH
-    ? `${sanitized.slice(0, MAX_SAFE_ERROR_MESSAGE_LENGTH)}...`
+    ? `${truncateUtf16Safe(sanitized, MAX_SAFE_ERROR_MESSAGE_LENGTH)}...`
     : sanitized;
 }
 
@@ -223,7 +228,7 @@ function readSafeErrorMetadata(error: unknown): DiagnosticStabilityBundle["error
   };
 }
 
-export function resolveDiagnosticStabilityBundleDir(
+function resolveDiagnosticStabilityBundleDir(
   options: DiagnosticStabilityBundleLocationOptions = {},
 ): string {
   return path.join(
@@ -242,15 +247,6 @@ function buildBundlePath(dir: string, now: Date, reason: string): string {
 
 function isBundleFile(name: string): boolean {
   return name.startsWith(BUNDLE_PREFIX) && name.endsWith(BUNDLE_SUFFIX);
-}
-
-function isMissingFileError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === "ENOENT"
-  );
 }
 
 function readObject(value: unknown, label: string): Record<string, unknown> {
@@ -694,6 +690,7 @@ function readStabilityEventRecord(
   assignOptionalCodeString(sanitized, "outcome", record.outcome, `${label}.outcome`);
   assignOptionalCodeString(sanitized, "level", record.level, `${label}.level`);
   assignOptionalCodeString(sanitized, "phase", record.phase, `${label}.phase`);
+  assignOptionalCodeString(sanitized, "approvalId", record.approvalId, `${label}.approvalId`);
   assignOptionalCodeString(sanitized, "detector", record.detector, `${label}.detector`);
   assignOptionalCodeString(sanitized, "toolName", record.toolName, `${label}.toolName`);
   assignOptionalCodeString(
@@ -740,10 +737,42 @@ function readStabilityEventRecord(
   assignOptionalNumber(sanitized, "ageMs", record.ageMs, `${label}.ageMs`);
   assignOptionalNumber(sanitized, "queueDepth", record.queueDepth, `${label}.queueDepth`);
   assignOptionalNumber(sanitized, "queueSize", record.queueSize, `${label}.queueSize`);
+  assignOptionalNumber(sanitized, "queueLength", record.queueLength, `${label}.queueLength`);
   assignOptionalNumber(sanitized, "waitMs", record.waitMs, `${label}.waitMs`);
   assignOptionalNumber(sanitized, "active", record.active, `${label}.active`);
   assignOptionalNumber(sanitized, "waiting", record.waiting, `${label}.waiting`);
   assignOptionalNumber(sanitized, "queued", record.queued, `${label}.queued`);
+  assignOptionalNumber(sanitized, "droppedEvents", record.droppedEvents, `${label}.droppedEvents`);
+  assignOptionalNumber(
+    sanitized,
+    "droppedTrustedEvents",
+    record.droppedTrustedEvents,
+    `${label}.droppedTrustedEvents`,
+  );
+  assignOptionalNumber(
+    sanitized,
+    "droppedUntrustedEvents",
+    record.droppedUntrustedEvents,
+    `${label}.droppedUntrustedEvents`,
+  );
+  assignOptionalNumber(
+    sanitized,
+    "droppedPriorityEvents",
+    record.droppedPriorityEvents,
+    `${label}.droppedPriorityEvents`,
+  );
+  assignOptionalNumber(
+    sanitized,
+    "maxQueueLength",
+    record.maxQueueLength,
+    `${label}.maxQueueLength`,
+  );
+  assignOptionalNumber(
+    sanitized,
+    "drainBatchSize",
+    record.drainBatchSize,
+    `${label}.drainBatchSize`,
+  );
 
   if (record.webhooks !== undefined) {
     const webhooks = readObject(record.webhooks, `${label}.webhooks`);
@@ -864,8 +893,7 @@ function readPositiveMemoryFile(file: string): number | "max" | undefined {
     if (raw === "max") {
       return "max";
     }
-    const parsed = Number.parseInt(raw, 10);
-    return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+    return parseStrictNonNegativeInteger(raw);
   } catch {
     return undefined;
   }
@@ -879,8 +907,8 @@ function readCgroupEventFile(file: string): Record<string, number> {
       if (!key || !SAFE_REASON_CODE.test(key)) {
         continue;
       }
-      const value = Number.parseInt(raw ?? "", 10);
-      if (Number.isFinite(value) && value >= 0) {
+      const value = parseStrictNonNegativeInteger(raw ?? "");
+      if (value !== undefined) {
         events[key] = value;
       }
     }
@@ -992,10 +1020,10 @@ function collectActiveResources(): DiagnosticActiveResourceSummary | undefined {
 function sanitizeSessionEvidencePath(relativePath: string): string {
   const parts = relativePath.split("/");
   if (parts.length === 4 && parts[0] === "agents" && parts[2] === "sessions") {
-    return `agents/<agent>/sessions/${sanitizeSessionEvidenceFileName(parts[3])}`;
+    return `agents/<agent>/sessions/${sanitizeSessionEvidenceFileName(expectDefined(parts[3], "parts entry at 3"))}`;
   }
   if (parts.length === 2 && parts[0] === "sessions") {
-    return `sessions/${sanitizeSessionEvidenceFileName(parts[1])}`;
+    return `sessions/${sanitizeSessionEvidenceFileName(expectDefined(parts[1], "parts entry at 1"))}`;
   }
   return redactSensitiveText(relativePath, { mode: "tools" });
 }
@@ -1181,7 +1209,7 @@ function isMemoryPressureReason(reason: string): reason is DiagnosticMemoryPress
   return reason === "rss_threshold" || reason === "heap_threshold" || reason === "rss_growth";
 }
 
-export function listDiagnosticStabilityBundleFilesSync(
+function listDiagnosticStabilityBundleFilesSync(
   options: DiagnosticStabilityBundleLocationOptions = {},
 ): DiagnosticStabilityBundleFile[] {
   const dir = resolveDiagnosticStabilityBundleDir(options);
@@ -1198,7 +1226,7 @@ export function listDiagnosticStabilityBundleFilesSync(
       })
       .toSorted((a, b) => b.mtimeMs - a.mtimeMs || b.path.localeCompare(a.path));
   } catch (error) {
-    if (isMissingFileError(error)) {
+    if (isMissingPathError(error)) {
       return [];
     }
     throw error;
@@ -1385,3 +1413,4 @@ export function uninstallDiagnosticStabilityFatalHook(): void {
 export function resetDiagnosticStabilityBundleForTest(): void {
   uninstallDiagnosticStabilityFatalHook();
 }
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

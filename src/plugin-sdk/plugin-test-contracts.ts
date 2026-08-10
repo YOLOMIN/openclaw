@@ -1,3 +1,6 @@
+/**
+ * Test SDK subpath for plugin package, registration, and public surface contracts.
+ */
 export {
   assertNoImportTimeSideEffects,
   createPluginRegistryFixture,
@@ -16,8 +19,4 @@ export {
   BUNDLED_RUNTIME_SIDECAR_BASENAMES,
   getPublicArtifactBasename,
 } from "./test-helpers/public-artifacts.js";
-export {
-  loadBundledPluginPublicSurface,
-  loadBundledPluginPublicSurfaceSync,
-  resolveWorkspacePackagePublicModuleUrl,
-} from "./test-helpers/public-surface-loader.js";
+export { loadBundledPluginPublicSurface } from "./test-helpers/public-surface-loader.js";

@@ -1,3 +1,4 @@
+// Inbound reply dispatch tests cover plugin reply routing from inbound channel messages.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DispatchReplyWithBufferedBlockDispatcher } from "../auto-reply/reply/provider-dispatcher.types.js";
 import type { FinalizedMsgContext } from "../auto-reply/templating.js";
@@ -5,6 +6,11 @@ import type { RecordInboundSession } from "../channels/session.types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 
 const deliverInboundReplyWithMessageSendContext = vi.hoisted(() => vi.fn());
+const dispatchReplyFromConfig = vi.hoisted(() => vi.fn());
+
+vi.mock("../auto-reply/reply/dispatch-from-config.js", () => ({
+  dispatchReplyFromConfig,
+}));
 
 vi.mock("../channels/turn/kernel.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../channels/turn/kernel.js")>();
@@ -19,9 +25,6 @@ import {
   createReplyPrefixOptions as createChannelMessageReplyPrefixOptions,
   createReplyPrefixContext as createChannelMessageReplyPrefixContext,
   createTypingCallbacks as createChannelMessageTypingCallbacks,
-  dispatchChannelMessageReplyWithBase,
-  hasFinalChannelMessageReplyDispatch,
-  recordChannelMessageReplyDispatch,
   resolveChannelMessageSourceReplyDeliveryMode,
 } from "./channel-message.js";
 import {
@@ -34,6 +37,8 @@ import {
 import {
   hasFinalInboundReplyDispatch,
   hasVisibleInboundReplyDispatch,
+  dispatchInboundReplyWithBase,
+  dispatchReplyFromConfigWithSettledDispatcher,
   recordInboundSessionAndDispatchReply,
   resolveInboundReplyDispatchCounts,
 } from "./inbound-reply-dispatch.js";
@@ -45,6 +50,33 @@ function readFirstMockArg(fn: unknown): unknown {
 describe("recordInboundSessionAndDispatchReply", () => {
   beforeEach(() => {
     deliverInboundReplyWithMessageSendContext.mockReset();
+    dispatchReplyFromConfig.mockReset();
+  });
+
+  it("uses the prepared Gateway runtime in the settled dispatcher wrapper", async () => {
+    const dispatcher = {
+      markComplete: vi.fn(),
+      waitForIdle: vi.fn(async () => undefined),
+    } as unknown as Parameters<
+      typeof dispatchReplyFromConfigWithSettledDispatcher
+    >[0]["dispatcher"];
+    const onSettled = vi.fn();
+    dispatchReplyFromConfig.mockResolvedValue({
+      queuedFinal: false,
+      counts: { tool: 0, block: 0, final: 0 },
+    });
+
+    await dispatchReplyFromConfigWithSettledDispatcher({
+      cfg: {} as OpenClawConfig,
+      ctxPayload: {} as FinalizedMsgContext,
+      dispatcher,
+      onSettled,
+    });
+
+    expect(readFirstMockArg(dispatchReplyFromConfig)).toMatchObject({
+      usePublishedModelRuntime: true,
+    });
+    expect(onSettled).toHaveBeenCalledOnce();
   });
 
   it("delegates record and dispatch through the channel turn kernel once", async () => {
@@ -74,7 +106,7 @@ describe("recordInboundSessionAndDispatchReply", () => {
       Surface: "test",
     } as FinalizedMsgContext;
 
-    await recordChannelMessageReplyDispatch({
+    await recordInboundSessionAndDispatchReply({
       cfg: {} as OpenClawConfig,
       channel: "test",
       accountId: "default",
@@ -179,7 +211,7 @@ describe("recordInboundSessionAndDispatchReply", () => {
       Surface: "telegram",
     } as FinalizedMsgContext;
 
-    await dispatchChannelMessageReplyWithBase({
+    await dispatchInboundReplyWithBase({
       cfg: {} as OpenClawConfig,
       channel: "telegram",
       accountId: "default",
@@ -222,12 +254,72 @@ describe("recordInboundSessionAndDispatchReply", () => {
     expect(deliver).not.toHaveBeenCalled();
   });
 
+  it("returns durable no-send results through the SDK compatibility deliverer", async () => {
+    deliverInboundReplyWithMessageSendContext.mockResolvedValue({
+      status: "handled_no_send",
+      reason: "no_visible_result",
+      delivery: {
+        messageIds: [],
+        visibleReplySent: false,
+      },
+    });
+    const recordInboundSession = vi.fn(async () => undefined) as unknown as RecordInboundSession;
+    const deliver = vi.fn(async () => undefined);
+    let deliveryResult: unknown;
+    const dispatchReplyWithBufferedBlockDispatcher = vi.fn(async (params) => {
+      deliveryResult = await params.dispatcherOptions.deliver(
+        { text: "cancelled durable" },
+        { kind: "final" },
+      );
+      return {
+        queuedFinal: true,
+        counts: { tool: 0, block: 0, final: 1 },
+      };
+    }) as DispatchReplyWithBufferedBlockDispatcher;
+
+    await recordInboundSessionAndDispatchReply({
+      cfg: {} as OpenClawConfig,
+      channel: "telegram",
+      accountId: "default",
+      agentId: "main",
+      routeSessionKey: "agent:main:telegram:peer",
+      storePath: "/tmp/sessions.json",
+      ctxPayload: {
+        Body: "body",
+        RawBody: "body",
+        CommandBody: "body",
+        From: "sender",
+        To: "123",
+        OriginatingTo: "123",
+        SessionKey: "agent:main:telegram:peer",
+        Provider: "telegram",
+        Surface: "telegram",
+      } as FinalizedMsgContext,
+      recordInboundSession,
+      dispatchReplyWithBufferedBlockDispatcher,
+      deliver,
+      durable: { replyToMode: "first" },
+      onRecordError: vi.fn(),
+      onDispatchError: vi.fn(),
+    });
+
+    expect(deliveryResult).toMatchObject({ visibleReplySent: false });
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
   it("exports shared visible reply dispatch helpers", () => {
     expect(hasVisibleInboundReplyDispatch(undefined)).toBe(false);
     expect(
       hasVisibleInboundReplyDispatch({
         queuedFinal: false,
         counts: { tool: 0, block: 1, final: 0 },
+      }),
+    ).toBe(true);
+    expect(
+      hasVisibleInboundReplyDispatch({
+        queuedFinal: false,
+        counts: { tool: 0, block: 0, final: 0 },
+        observedReplyDelivery: true,
       }),
     ).toBe(true);
     expect(
@@ -248,7 +340,7 @@ describe("recordInboundSessionAndDispatchReply", () => {
     });
   });
 
-  it("exposes channel-message dispatch names as the canonical helpers for new channel code", () => {
+  it("keeps channel-message pipeline names aligned with focused helpers", () => {
     expect(createChannelMessageReplyPipeline).toBe(createChannelReplyPipeline);
     expect(resolveChannelMessageSourceReplyDeliveryMode).toBe(
       resolveChannelSourceReplyDeliveryMode,
@@ -256,6 +348,5 @@ describe("recordInboundSessionAndDispatchReply", () => {
     expect(createChannelMessageReplyPrefixContext).toBe(createReplyPrefixContext);
     expect(createChannelMessageReplyPrefixOptions).toBe(createReplyPrefixOptions);
     expect(createChannelMessageTypingCallbacks).toBe(createTypingCallbacks);
-    expect(hasFinalChannelMessageReplyDispatch).toBe(hasFinalInboundReplyDispatch);
   });
 });

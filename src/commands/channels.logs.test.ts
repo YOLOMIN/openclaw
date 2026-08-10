@@ -1,3 +1,4 @@
+// Channels logs tests cover gateway log path resolution and channel log tailing.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -25,6 +26,12 @@ vi.mock("../channels/plugins/index.js", () => ({
 import { channelsLogsCommand } from "./channels/logs.js";
 
 const runtime = createTestRuntime();
+type PositionalRead = (
+  buffer: Buffer,
+  offset: number,
+  length: number,
+  position: number | null,
+) => Promise<{ bytesRead: number; buffer: Buffer }>;
 
 function logLine(params: { module: string; message: string }) {
   return JSON.stringify({
@@ -61,6 +68,7 @@ describe("channelsLogsCommand", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     setLoggerOverride(null);
     await fs.rm(tempDir, { recursive: true, force: true });
   });
@@ -141,6 +149,33 @@ describe("channelsLogsCommand", () => {
     expect(payload.lines.map((line) => line.message)).toEqual(["current sent"]);
   });
 
+  it("fills short positional reads before parsing channel log lines", async () => {
+    const realOpen = fs.open.bind(fs);
+    const readLengths: number[] = [];
+    vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+      const handle = await realOpen(...args);
+      const realRead = handle.read.bind(handle) as PositionalRead;
+      const shortRead = vi.fn<PositionalRead>((buffer, offset, length, position) => {
+        readLengths.push(length);
+        return realRead(buffer, offset, Math.min(length, 4), position);
+      });
+      Object.defineProperty(handle, "read", { configurable: true, value: shortRead });
+      return handle;
+    });
+    await fs.writeFile(
+      logPath,
+      [
+        logLine({ module: "gateway/channels/slack/send", message: "first" }),
+        logLine({ module: "gateway/channels/slack/send", message: "second" }),
+      ].join("\n"),
+    );
+
+    await channelsLogsCommand({ channel: "slack", json: true }, runtime);
+
+    expect(readJsonPayload().lines.map((line) => line.message)).toEqual(["first", "second"]);
+    expect(readLengths.length).toBeGreaterThan(1);
+  });
+
   it("returns the first line of the tail window when start aligns with a line boundary", async () => {
     // MAX_BYTES in readTailLines is 1_000_000. We build a file of 2_000_000 bytes
     // made of 10_000 lines each exactly 200 bytes (199 payload + "\n"), so the
@@ -214,5 +249,11 @@ describe("channelsLogsCommand", () => {
     const payload = readJsonPayload();
     expect(payload.file).toBe(configuredFile);
     expect(payload.lines).toStrictEqual([]);
+  });
+
+  it("rejects partial line limits", async () => {
+    await expect(channelsLogsCommand({ lines: "2x", json: true }, runtime)).rejects.toThrow(
+      "--lines must be a positive integer.",
+    );
   });
 });

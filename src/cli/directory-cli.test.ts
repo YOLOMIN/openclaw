@@ -1,3 +1,4 @@
+// Directory CLI tests cover directory command registration and plugin-backed lookups.
 import { Command } from "commander";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { registerDirectoryCli } from "./directory-cli.js";
@@ -14,7 +15,6 @@ const mocks = vi.hoisted(() => ({
   replaceConfigFile: vi.fn(),
   resolveInstallableChannelPlugin: vi.fn(),
   resolveMessageChannelSelection: vi.fn(),
-  getChannelPlugin: vi.fn(),
   resolveChannelDefaultAccountId: vi.fn(),
 }));
 
@@ -35,10 +35,6 @@ vi.mock("../commands/channel-setup/channel-plugin-resolution.js", () => ({
 
 vi.mock("../infra/outbound/channel-selection.js", () => ({
   resolveMessageChannelSelection: mocks.resolveMessageChannelSelection,
-}));
-
-vi.mock("../channels/plugins/index.js", () => ({
-  getChannelPlugin: mocks.getChannelPlugin,
 }));
 
 vi.mock("../channels/plugins/helpers.js", () => ({
@@ -86,6 +82,7 @@ describe("registerDirectoryCli", () => {
     mocks.resolveChannelDefaultAccountId.mockReturnValue("default");
     mocks.resolveMessageChannelSelection.mockResolvedValue({
       channel: "demo-channel",
+      plugin: { id: "demo-channel" },
       configured: ["demo-channel"],
       source: "explicit",
     });
@@ -149,12 +146,12 @@ describe("registerDirectoryCli", () => {
     });
     mocks.resolveMessageChannelSelection.mockResolvedValue({
       channel: "whatsapp",
+      plugin: {
+        id: "whatsapp",
+        directory: { self },
+      },
       configured: ["whatsapp"],
       source: "single-configured",
-    });
-    mocks.getChannelPlugin.mockReturnValue({
-      id: "whatsapp",
-      directory: { self },
     });
 
     const program = new Command().name("openclaw");
@@ -277,5 +274,47 @@ describe("registerDirectoryCli", () => {
         message.includes("Channel openclaw-weixin does not support directory peers"),
       ),
     ).toBe(true);
+  });
+
+  it.each([
+    ["peers list", ["directory", "peers", "list", "--channel", "slack", "--limit", "5x"]],
+    ["groups list", ["directory", "groups", "list", "--channel", "slack", "--limit", "5x"]],
+    [
+      "group members",
+      [
+        "directory",
+        "groups",
+        "members",
+        "--channel",
+        "slack",
+        "--group-id",
+        "group-1",
+        "--limit",
+        "5x",
+      ],
+    ],
+  ])("rejects partial directory limit for %s", async (_label, args) => {
+    mocks.resolveInstallableChannelPlugin.mockResolvedValue({
+      cfg: { channels: { slack: {} } },
+      channelId: "slack",
+      plugin: {
+        id: "slack",
+        directory: {
+          listPeers: vi.fn().mockResolvedValue([]),
+          listGroups: vi.fn().mockResolvedValue([]),
+          listGroupMembers: vi.fn().mockResolvedValue([]),
+        },
+      },
+      configChanged: false,
+    });
+
+    const program = new Command().name("openclaw");
+    registerDirectoryCli(program);
+
+    await expect(program.parseAsync(args, { from: "user" })).rejects.toThrow("exit:1");
+
+    expect(runtimeErrors().join("\n")).toContain("--limit must be a positive integer.");
+    expect(mocks.resolveInstallableChannelPlugin).not.toHaveBeenCalled();
+    expect(mocks.replaceConfigFile).not.toHaveBeenCalled();
   });
 });

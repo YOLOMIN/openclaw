@@ -1,33 +1,17 @@
-import type { ReplyPayload } from "../../auto-reply/reply-payload.js";
-import {
-  clearHistoryEntriesIfEnabled,
-  recordPendingHistoryEntryWithMedia,
-} from "../../auto-reply/reply/history.js";
+import { recordChannelHistoryEntryWithMedia } from "../../auto-reply/reply/history.js";
 import { toHistoryMediaEntries } from "../inbound-event/media.js";
-import { createChannelReplyPipeline } from "../message/reply-pipeline.js";
-import type { CreateChannelReplyPipelineParams } from "../message/reply-pipeline.js";
-import { recordChannelBotPairLoopAndCheckSuppression } from "./bot-loop-protection.js";
-import { EMPTY_CHANNEL_TURN_DISPATCH_COUNTS } from "./dispatch-result.js";
 import {
-  deliverInboundReplyWithMessageSendContext,
-  isDurableInboundReplyDeliveryHandled,
-  throwIfDurableInboundReplyDeliveryFailed,
-} from "./durable-delivery.js";
-export {
-  buildChannelInboundEventContext,
-  filterChannelInboundSupplementalContext,
-} from "../inbound-event/context.js";
-export type { BuildChannelInboundEventContextParams } from "../inbound-event/context.js";
-export {
-  clearChannelBotPairLoopGuardForTests,
-  listTrackedChannelBotPairsForTests,
-  recordChannelBotPairLoopAndCheckSuppression,
-} from "./bot-loop-protection.js";
-export { createChannelHistoryWindow } from "./history-window.js";
-export type { ChannelHistoryWindow } from "./history-window.js";
+  assembleResolvedChannelTurn,
+  dispatchAssembledChannelTurn as dispatchAssembledChannelTurnImpl,
+  dispatchRoutedChannelTurn as dispatchRoutedChannelTurnImpl,
+  runPreparedInboundReply as runPreparedInboundReplyImpl,
+} from "./lifecycle.js";
+
+export { recordChannelBotPairLoopAndCheckSuppression } from "./bot-loop-protection.js";
+
 export type { ChannelBotLoopProtectionFacts } from "./bot-loop-protection.js";
+
 export {
-  deliverDurableInboundReplyPayload,
   deliverInboundReplyWithMessageSendContext,
   isDurableInboundReplyDeliveryHandled,
   throwIfDurableInboundReplyDeliveryFailed,
@@ -35,81 +19,54 @@ export {
 export type {
   DurableInboundReplyDeliveryOptions,
   DurableInboundReplyDeliveryParams,
-  DurableInboundReplyDeliveryResult,
 } from "./durable-delivery.js";
 import type {
   AssembledChannelTurn,
   ChannelEventClass,
+  ChannelProviderOwnedMessageSendingDeliveryAdapter,
   ChannelTurnAdmission,
-  ChannelEventDeliveryAdapter,
-  ChannelTurnHistoryFinalizeOptions,
+  ChannelTurnDeliveryAdapter,
   ChannelTurnLogEvent,
-  ChannelTurnResolved,
+  ChannelTurnPlan,
   ChannelTurnResult,
   DispatchedChannelTurnResult,
   NormalizedTurnInput,
-  PreparedChannelTurn,
   PreflightFacts,
+  PreparedChannelTurn,
   RunChannelTurnParams,
-  RunResolvedChannelTurnParams,
 } from "./types.js";
-export { createChannelDeliveryResultFromReceipt } from "./delivery-result.js";
+
 export {
-  EMPTY_CHANNEL_TURN_DISPATCH_COUNTS,
   hasFinalChannelTurnDispatch,
   hasVisibleChannelTurnDispatch,
   resolveChannelTurnDispatchCounts,
-  type ChannelTurnDispatchResultLike,
-  type ChannelTurnVisibleDeliverySignals,
 } from "./dispatch-result.js";
-export type {
-  AccessFacts,
-  AssembledChannelTurn,
-  ChannelDeliveryInfo,
-  ChannelDeliveryResult,
-  ChannelEventClass,
-  ChannelTurnAdapter,
-  ChannelTurnAdmission,
-  ChannelEventDeliveryAdapter,
-  ChannelTurnDroppedHistoryOptions,
-  ChannelTurnHistoryFinalizeOptions,
-  ChannelTurnDispatcherOptions,
-  ChannelTurnLogEvent,
-  ChannelTurnRecordOptions,
-  ChannelTurnReplyPipelineOptions,
-  ChannelTurnResolved,
-  ChannelTurnResult,
-  DispatchedChannelTurnResult,
-  ConversationFacts,
-  MessageFacts,
-  NormalizedTurnInput,
-  PreflightFacts,
-  PreparedChannelTurn,
-  ReplyPlanFacts,
-  RouteFacts,
-  RunChannelTurnParams,
-  RunResolvedChannelTurnParams,
-  SenderFacts,
-  SupplementalContextFacts,
-} from "./types.js";
-export type { InboundMediaFacts } from "./types.js";
+export type { ChannelTurnResult } from "./types.js";
+
+export function dispatchAssembledChannelTurn(
+  params: AssembledChannelTurn,
+): Promise<ChannelTurnResult> {
+  return dispatchAssembledChannelTurnImpl(params);
+}
+
+export const dispatchChannelInboundReply = dispatchAssembledChannelTurn;
+
+export function dispatchChannelInboundTurn(
+  plan: ChannelTurnPlan<ChannelProviderOwnedMessageSendingDeliveryAdapter>,
+): Promise<ChannelTurnResult>;
+export function dispatchChannelInboundTurn(plan: ChannelTurnPlan): Promise<ChannelTurnResult>;
+export function dispatchChannelInboundTurn(
+  plan: ChannelTurnPlan<ChannelTurnDeliveryAdapter>,
+): Promise<ChannelTurnResult> {
+  return dispatchRoutedChannelTurnImpl(plan);
+}
+
+export const runPreparedInboundReply = runPreparedInboundReplyImpl;
 
 const DEFAULT_EVENT_CLASS: ChannelEventClass = {
   kind: "message",
   canStartAgentTurn: true,
 };
-
-/**
- * @deprecated Compatibility assembly for legacy buffered reply dispatchers.
- * New channel plugins should expose `defineChannelMessageAdapter(...)` from
- * `openclaw/plugin-sdk/channel-message` and route send/receive behavior through
- * the message lifecycle helpers.
- */
-export function createChannelTurnReplyPipeline(
-  params: CreateChannelReplyPipelineParams,
-): ReturnType<typeof createChannelReplyPipeline> {
-  return createChannelReplyPipeline(params);
-}
 
 function isAdmission(value: unknown): value is ChannelTurnAdmission {
   if (!value || typeof value !== "object") {
@@ -131,6 +88,23 @@ function normalizePreflight(
   return value;
 }
 
+function assertPreparedDispatchLifecycle<TDispatchResult>(
+  turn: PreparedChannelTurn<TDispatchResult>,
+  turnAdoptionLifecycle: RunChannelTurnParams<unknown>["turnAdoptionLifecycle"],
+): void {
+  const lifecycle = turn.runDispatchLifecycle;
+  if (!lifecycle) {
+    throw new Error(
+      "runChannelInboundEvent prepared turns must declare runDispatchLifecycle when creating runDispatch",
+    );
+  }
+  if (turnAdoptionLifecycle && lifecycle.turnAdoptionLifecycle !== turnAdoptionLifecycle) {
+    throw new Error(
+      "runChannelInboundEvent prepared turn runDispatchLifecycle must own the top-level turnAdoptionLifecycle",
+    );
+  }
+}
+
 function emit(params: {
   log?: (event: ChannelTurnLogEvent) => void;
   event: Omit<ChannelTurnLogEvent, "channel" | "accountId">;
@@ -141,25 +115,6 @@ function emit(params: {
     channel: params.channel,
     accountId: params.accountId,
     ...params.event,
-  });
-}
-
-export function createNoopChannelEventDeliveryAdapter(): ChannelEventDeliveryAdapter {
-  return {
-    deliver: async () => ({
-      visibleReplySent: false,
-    }),
-  };
-}
-
-function clearPendingHistoryAfterTurn(params?: ChannelTurnHistoryFinalizeOptions): void {
-  if (!params?.isGroup || !params.historyKey || !params.historyMap || params.limit === undefined) {
-    return;
-  }
-  clearHistoryEntriesIfEnabled({
-    historyMap: params.historyMap,
-    historyKey: params.historyKey,
-    limit: params.limit,
   });
 }
 
@@ -187,7 +142,7 @@ function resolveDroppedHistoryBody(input: NormalizedTurnInput, preflight: Prefli
   );
 }
 
-export async function recordDroppedChannelTurnHistory(params: {
+async function recordDroppedChannelTurnHistory(params: {
   input: NormalizedTurnInput;
   preflight: PreflightFacts;
   admission?: ChannelTurnAdmission;
@@ -211,7 +166,7 @@ export async function recordDroppedChannelTurnHistory(params: {
         }
       : null;
   const media = params.preflight.media;
-  await recordPendingHistoryEntryWithMedia({
+  await recordChannelHistoryEntryWithMedia({
     historyMap: history.historyMap,
     historyKey: history.key,
     limit: history.limit,
@@ -226,327 +181,27 @@ export async function recordDroppedChannelTurnHistory(params: {
   });
 }
 
-function resolveAssembledReplyPipeline(
-  params: AssembledChannelTurn,
-): Pick<AssembledChannelTurn, "dispatcherOptions" | "replyOptions"> {
-  if (!params.replyPipeline) {
-    return {
-      dispatcherOptions: params.dispatcherOptions,
-      replyOptions: params.replyOptions,
-    };
-  }
-  const { onModelSelected, ...replyPipeline } = createChannelReplyPipeline({
-    cfg: params.cfg,
-    agentId: params.agentId,
-    channel: params.channel,
-    accountId: params.accountId,
-    ...params.replyPipeline,
-  });
-  return {
-    dispatcherOptions: {
-      ...replyPipeline,
-      ...params.dispatcherOptions,
-    },
-    replyOptions: {
-      onModelSelected,
-      ...params.replyOptions,
-    },
-  };
-}
+export const recordDroppedChannelInboundHistory = recordDroppedChannelTurnHistory;
 
-function resolveObserveOnlyDispatchResult<TDispatchResult>(
-  params: PreparedChannelTurn<TDispatchResult>,
-): TDispatchResult {
-  return (params.observeOnlyDispatchResult ?? {
-    queuedFinal: false,
-    counts: EMPTY_CHANNEL_TURN_DISPATCH_COUNTS,
-  }) as TDispatchResult;
-}
-
-function resolveBotLoopProtectionDrop<TDispatchResult>(
-  params: PreparedChannelTurn<TDispatchResult>,
-): ChannelTurnResult<TDispatchResult> | undefined {
-  if (!params.botLoopProtection) {
-    return undefined;
-  }
-  const botLoopResult = recordChannelBotPairLoopAndCheckSuppression(params.botLoopProtection);
-  if (!botLoopResult.suppressed) {
-    return undefined;
-  }
-  const admission: ChannelTurnAdmission = { kind: "drop", reason: "bot-loop-protection" };
-  emit({
-    ...params,
-    event: {
-      stage: "authorize",
-      event: "drop",
-      messageId: params.messageId,
-      sessionKey: params.ctxPayload.SessionKey ?? params.routeSessionKey,
-      admission: admission.kind,
-      reason: admission.reason,
-    },
-  });
-  return {
-    admission,
-    dispatched: false,
-    ctxPayload: params.ctxPayload,
-    routeSessionKey: params.routeSessionKey,
-  };
-}
-
-type AssembledChannelTurnWithBotLoopProtection = AssembledChannelTurn & {
-  botLoopProtection: NonNullable<AssembledChannelTurn["botLoopProtection"]>;
-};
-
-type AssembledChannelTurnWithoutBotLoopProtection = Omit<
-  AssembledChannelTurn,
-  "botLoopProtection"
-> & {
-  botLoopProtection?: undefined;
-};
-
-export function dispatchAssembledChannelTurn(
-  params: AssembledChannelTurnWithBotLoopProtection,
-): Promise<ChannelTurnResult>;
-export function dispatchAssembledChannelTurn(
-  params: AssembledChannelTurnWithoutBotLoopProtection,
-): Promise<DispatchedChannelTurnResult>;
-export function dispatchAssembledChannelTurn(
-  params: AssembledChannelTurn,
-): Promise<ChannelTurnResult>;
-export async function dispatchAssembledChannelTurn(
-  params: AssembledChannelTurn,
-): Promise<ChannelTurnResult> {
-  const replyPipeline = resolveAssembledReplyPipeline(params);
-  return await runPreparedChannelTurnCore(
-    {
-      channel: params.channel,
-      accountId: params.accountId,
-      routeSessionKey: params.routeSessionKey,
-      storePath: params.storePath,
-      ctxPayload: params.ctxPayload,
-      recordInboundSession: params.recordInboundSession,
-      record: params.record,
-      history: params.history,
-      admission: params.admission,
-      botLoopProtection: params.botLoopProtection,
-      log: params.log,
-      messageId: params.messageId,
-      runDispatch: async () =>
-        await params.dispatchReplyWithBufferedBlockDispatcher({
-          ctx: params.ctxPayload,
-          cfg: params.cfg,
-          dispatcherOptions: {
-            ...replyPipeline.dispatcherOptions,
-            deliver: async (payload: ReplyPayload, info) => {
-              const preparedPayload = params.delivery.preparePayload
-                ? await params.delivery.preparePayload(payload, info)
-                : payload;
-              const durableOptions =
-                typeof params.delivery.durable === "function"
-                  ? await params.delivery.durable(preparedPayload, info)
-                  : params.delivery.durable;
-              if (durableOptions) {
-                const durable = await deliverInboundReplyWithMessageSendContext({
-                  cfg: params.cfg,
-                  channel: params.channel,
-                  accountId: params.accountId,
-                  agentId: params.agentId,
-                  ctxPayload: params.ctxPayload,
-                  payload: preparedPayload,
-                  info,
-                  ...durableOptions,
-                });
-                throwIfDurableInboundReplyDeliveryFailed(durable);
-                if (isDurableInboundReplyDeliveryHandled(durable)) {
-                  await params.delivery.onDelivered?.(preparedPayload, info, durable.delivery);
-                  return durable.delivery;
-                }
-              }
-              const result = await params.delivery.deliver(preparedPayload, info);
-              await params.delivery.onDelivered?.(preparedPayload, info, result);
-              return result;
-            },
-            onError: params.delivery.onError,
-          },
-          replyOptions: replyPipeline.replyOptions,
-          replyResolver: params.replyResolver,
-        }),
-    },
-    { suppressObserveOnlyDispatch: false },
-  );
-}
-
-function isPreparedChannelTurn<TDispatchResult>(
-  value: ChannelTurnResolved<TDispatchResult>,
-): value is PreparedChannelTurn<TDispatchResult> & {
-  admission?: Extract<ChannelTurnAdmission, { kind: "dispatch" | "observeOnly" }>;
-} {
-  return "runDispatch" in value;
-}
-
-async function dispatchResolvedChannelTurn<TDispatchResult>(
-  params: ChannelTurnResolved<TDispatchResult> & {
-    admission: Extract<ChannelTurnAdmission, { kind: "dispatch" | "observeOnly" }>;
-    log?: (event: ChannelTurnLogEvent) => void;
-    messageId?: string;
-  },
-): Promise<ChannelTurnResult<TDispatchResult>> {
-  if (isPreparedChannelTurn(params)) {
-    return await runPreparedChannelTurn(params);
-  }
-  return (await dispatchAssembledChannelTurn(params)) as ChannelTurnResult<TDispatchResult>;
-}
-
-async function runPreparedChannelTurnCore<
-  TDispatchResult = DispatchedChannelTurnResult["dispatchResult"],
->(
-  params: PreparedChannelTurn<TDispatchResult>,
-  options: { suppressObserveOnlyDispatch: boolean },
-): Promise<ChannelTurnResult<TDispatchResult>> {
-  const admission = params.admission ?? ({ kind: "dispatch" } as const);
-  const botLoopDrop = resolveBotLoopProtectionDrop(params);
-  if (botLoopDrop) {
-    clearPendingHistoryAfterTurn(params.history);
-    return botLoopDrop;
-  }
-  emit({
-    ...params,
-    event: {
-      stage: "record",
-      event: "start",
-      messageId: params.messageId,
-      sessionKey: params.ctxPayload.SessionKey ?? params.routeSessionKey,
-      admission: admission.kind,
-    },
-  });
-  try {
-    await params.recordInboundSession({
-      storePath: params.storePath,
-      sessionKey: params.ctxPayload.SessionKey ?? params.routeSessionKey,
-      ctx: params.ctxPayload,
-      groupResolution: params.record?.groupResolution,
-      createIfMissing: params.record?.createIfMissing,
-      updateLastRoute: params.record?.updateLastRoute,
-      onRecordError: params.record?.onRecordError ?? (() => undefined),
-      trackSessionMetaTask: params.record?.trackSessionMetaTask,
-    });
-    emit({
-      ...params,
-      event: {
-        stage: "record",
-        event: "done",
-        messageId: params.messageId,
-        sessionKey: params.ctxPayload.SessionKey ?? params.routeSessionKey,
-        admission: admission.kind,
-      },
-    });
-  } catch (err) {
-    emit({
-      ...params,
-      event: {
-        stage: "record",
-        event: "error",
-        messageId: params.messageId,
-        sessionKey: params.ctxPayload.SessionKey ?? params.routeSessionKey,
-        admission: admission.kind,
-        error: err,
-      },
-    });
-    try {
-      await params.onPreDispatchFailure?.(err);
-    } catch {
-      // Preserve the original session-recording error.
-    }
-    throw err;
-  }
-
-  emit({
-    ...params,
-    event: {
-      stage: "dispatch",
-      event: "start",
-      messageId: params.messageId,
-      sessionKey: params.ctxPayload.SessionKey ?? params.routeSessionKey,
-      admission: admission.kind,
-    },
-  });
-  let dispatchResult: TDispatchResult;
-  try {
-    dispatchResult =
-      options.suppressObserveOnlyDispatch && admission.kind === "observeOnly"
-        ? resolveObserveOnlyDispatchResult(params)
-        : await params.runDispatch();
-  } catch (err) {
-    emit({
-      ...params,
-      event: {
-        stage: "dispatch",
-        event: "error",
-        messageId: params.messageId,
-        sessionKey: params.ctxPayload.SessionKey ?? params.routeSessionKey,
-        admission: admission.kind,
-        error: err,
-      },
-    });
-    throw err;
-  }
-  emit({
-    ...params,
-    event: {
-      stage: "dispatch",
-      event: "done",
-      messageId: params.messageId,
-      sessionKey: params.ctxPayload.SessionKey ?? params.routeSessionKey,
-      admission: admission.kind,
-    },
-  });
-  clearPendingHistoryAfterTurn(params.history);
-
-  return {
-    admission,
-    dispatched: true,
-    ctxPayload: params.ctxPayload,
-    routeSessionKey: params.routeSessionKey,
-    dispatchResult,
-  };
-}
-
-type PreparedChannelTurnWithBotLoopProtection<TDispatchResult> =
-  PreparedChannelTurn<TDispatchResult> & {
-    botLoopProtection: NonNullable<PreparedChannelTurn<TDispatchResult>["botLoopProtection"]>;
-  };
-
-type PreparedChannelTurnWithoutBotLoopProtection<TDispatchResult> = Omit<
-  PreparedChannelTurn<TDispatchResult>,
-  "botLoopProtection"
-> & {
-  botLoopProtection?: undefined;
-};
-
-export function runPreparedChannelTurn<
-  TDispatchResult = DispatchedChannelTurnResult["dispatchResult"],
->(
-  params: PreparedChannelTurnWithBotLoopProtection<TDispatchResult>,
-): Promise<ChannelTurnResult<TDispatchResult>>;
-export function runPreparedChannelTurn<
-  TDispatchResult = DispatchedChannelTurnResult["dispatchResult"],
->(
-  params: PreparedChannelTurnWithoutBotLoopProtection<TDispatchResult>,
-): Promise<DispatchedChannelTurnResult<TDispatchResult>>;
-export function runPreparedChannelTurn<
-  TDispatchResult = DispatchedChannelTurnResult["dispatchResult"],
->(params: PreparedChannelTurn<TDispatchResult>): Promise<ChannelTurnResult<TDispatchResult>>;
-export async function runPreparedChannelTurn<
-  TDispatchResult = DispatchedChannelTurnResult["dispatchResult"],
->(params: PreparedChannelTurn<TDispatchResult>): Promise<ChannelTurnResult<TDispatchResult>> {
-  return await runPreparedChannelTurnCore(params, { suppressObserveOnlyDispatch: true });
-}
-
-export async function runChannelTurn<
+async function runChannelTurn<
   TRaw,
   TDispatchResult = DispatchedChannelTurnResult["dispatchResult"],
 >(
-  params: RunChannelTurnParams<TRaw, TDispatchResult>,
+  params: RunChannelTurnParams<
+    TRaw,
+    TDispatchResult,
+    ChannelProviderOwnedMessageSendingDeliveryAdapter
+  >,
+): Promise<ChannelTurnResult<TDispatchResult>>;
+async function runChannelTurn<
+  TRaw,
+  TDispatchResult = DispatchedChannelTurnResult["dispatchResult"],
+>(params: RunChannelTurnParams<TRaw, TDispatchResult>): Promise<ChannelTurnResult<TDispatchResult>>;
+async function runChannelTurn<
+  TRaw,
+  TDispatchResult = DispatchedChannelTurnResult["dispatchResult"],
+>(
+  params: RunChannelTurnParams<TRaw, TDispatchResult, ChannelTurnDeliveryAdapter>,
 ): Promise<ChannelTurnResult<TDispatchResult>> {
   emit({
     ...params,
@@ -615,7 +270,9 @@ export async function runChannelTurn<
     return { admission: preflightAdmission, dispatched: false };
   }
 
-  const resolved = await params.adapter.resolveTurn(input, eventClass, preflight);
+  const unresolved = await params.adapter.resolveTurn(input, eventClass, preflight);
+  const isRoutedTurn = "route" in unresolved && !("runDispatch" in unresolved);
+  const resolved = assembleResolvedChannelTurn(unresolved);
   emit({
     ...params,
     accountId: resolved.accountId ?? params.accountId,
@@ -631,22 +288,37 @@ export async function runChannelTurn<
   const admission = resolved.admission ?? preflightAdmission ?? ({ kind: "dispatch" } as const);
   let result: ChannelTurnResult<TDispatchResult>;
   try {
-    const dispatchResult = await dispatchResolvedChannelTurn(
-      admission.kind === "observeOnly"
-        ? {
-            ...resolved,
-            delivery: createNoopChannelEventDeliveryAdapter(),
-            admission,
-            log: params.log,
-            messageId: input.id,
-          }
-        : {
+    if ("runDispatch" in resolved) {
+      assertPreparedDispatchLifecycle(resolved, params.turnAdoptionLifecycle);
+    }
+    const dispatchResult = (
+      "runDispatch" in resolved
+        ? await runPreparedInboundReply({
             ...resolved,
             admission,
             log: params.log,
             messageId: input.id,
-          },
-    );
+          })
+        : isRoutedTurn
+          ? await dispatchRoutedChannelTurnImpl({
+              ...(unresolved as ChannelTurnPlan<ChannelTurnDeliveryAdapter>),
+              admission,
+              log: params.log,
+              messageId: input.id,
+              ...(params.turnAdoptionLifecycle
+                ? { turnAdoptionLifecycle: params.turnAdoptionLifecycle }
+                : {}),
+            })
+          : await dispatchAssembledChannelTurn({
+              ...(resolved as AssembledChannelTurn),
+              admission,
+              log: params.log,
+              messageId: input.id,
+              ...(params.turnAdoptionLifecycle
+                ? { turnAdoptionLifecycle: params.turnAdoptionLifecycle }
+                : {}),
+            })
+    ) as ChannelTurnResult<TDispatchResult>;
     result = dispatchResult.dispatched ? { ...dispatchResult, admission } : dispatchResult;
   } catch (err) {
     const failedResult: ChannelTurnResult<TDispatchResult> = {
@@ -706,20 +378,4 @@ export async function runChannelTurn<
   return result;
 }
 
-export async function runResolvedChannelTurn<
-  TRaw,
-  TDispatchResult = DispatchedChannelTurnResult["dispatchResult"],
->(
-  params: RunResolvedChannelTurnParams<TRaw, TDispatchResult>,
-): Promise<ChannelTurnResult<TDispatchResult>> {
-  return await runChannelTurn({
-    channel: params.channel,
-    accountId: params.accountId,
-    raw: params.raw,
-    log: params.log,
-    adapter: {
-      ingest: (raw) => (typeof params.input === "function" ? params.input(raw) : params.input),
-      resolveTurn: params.resolveTurn,
-    },
-  });
-}
+export const runChannelInboundEvent = runChannelTurn;

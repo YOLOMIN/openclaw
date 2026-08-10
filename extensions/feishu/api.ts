@@ -1,3 +1,4 @@
+// Feishu API module exposes the plugin public contract.
 export { feishuPlugin } from "./src/channel.js";
 export { registerFeishuDocTools } from "./src/docx.js";
 export { registerFeishuChatTools } from "./src/chat.js";
@@ -28,5 +29,3 @@ export {
 } from "./src/thread-bindings.js";
 export { testing as feishuThreadBindingTesting } from "./src/thread-bindings.js";
 export { createClackPrompter } from "openclaw/plugin-sdk/setup-runtime";
-
-export const feishuSessionBindingAdapterChannels = ["feishu"] as const;

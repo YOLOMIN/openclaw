@@ -1,8 +1,7 @@
+import { detectOpenAICompletionsCompat } from "@openclaw/ai/transports";
+// Verifies OpenAI-compatible endpoint defaults for streaming usage and reasoning payloads.
 import { describe, expect, it } from "vitest";
-import {
-  detectOpenAICompletionsCompat,
-  resolveOpenAICompletionsCompatDefaults,
-} from "./openai-completions-compat.js";
+import { resolveOpenAICompletionsCompatDefaults } from "./openai-completions-compat.test-support.js";
 
 describe("resolveOpenAICompletionsCompatDefaults", () => {
   it("keeps streaming usage enabled for provider-declared compatible endpoints", () => {
@@ -50,6 +49,7 @@ describe("resolveOpenAICompletionsCompatDefaults", () => {
   it.each(["vllm", "sglang", "lmstudio"])(
     "enables streaming usage compat for manifest-declared local provider %s",
     (provider) => {
+      // Manifest capability, not provider id alone, enables local streaming usage compat.
       expect(
         resolveOpenAICompletionsCompatDefaults({
           provider,
@@ -82,6 +82,36 @@ describe("resolveOpenAICompletionsCompatDefaults", () => {
     expect(defaults.supportsReasoningEffort).toBe(false);
     expect(defaults.maxTokensField).toBe("max_tokens");
   });
+
+  it("uses Z.AI's documented max_tokens field", () => {
+    const defaults = resolveOpenAICompletionsCompatDefaults({
+      provider: "zai",
+      endpointClass: "zai-native",
+      knownProviderFamily: "zai",
+    });
+
+    expect(defaults.maxTokensField).toBe("max_tokens");
+  });
+
+  it("requires a non-empty user or assistant turn for ModelStudio-compatible providers", () => {
+    expect(
+      resolveOpenAICompletionsCompatDefaults({
+        provider: "qwen",
+        endpointClass: "modelstudio-native",
+        knownProviderFamily: "modelstudio",
+      }).requiresNonEmptyUserOrAssistantMessage,
+    ).toBe(true);
+  });
+
+  it("does not require a non-empty user or assistant turn for generic local endpoints", () => {
+    expect(
+      resolveOpenAICompletionsCompatDefaults({
+        provider: "vllm",
+        endpointClass: "local",
+        knownProviderFamily: "vllm",
+      }).requiresNonEmptyUserOrAssistantMessage,
+    ).toBe(false);
+  });
 });
 
 describe("detectOpenAICompletionsCompat", () => {
@@ -98,6 +128,7 @@ describe("detectOpenAICompletionsCompat", () => {
 
 describe("xiaomi compat detection", () => {
   it("sets thinkingFormat to deepseek for xiaomi-native endpoint", () => {
+    // Xiaomi's OpenAI-compatible route uses DeepSeek-style reasoning payloads.
     expect(
       resolveOpenAICompletionsCompatDefaults({
         provider: "xiaomi",

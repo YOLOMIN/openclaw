@@ -1,8 +1,13 @@
+// Subagent registry cleanup tests cover deferred cleanup decisions while
+// completion delivery, descendants, and retry windows are still unresolved.
 import { describe, expect, it } from "vitest";
 import { resolveDeferredCleanupDecision } from "./subagent-registry-cleanup.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
-function makeEntry(overrides: Partial<SubagentRunRecord> = {}): SubagentRunRecord {
+type EntryOverrides = Omit<Partial<SubagentRunRecord>, "execution"> & { endedAt?: number };
+
+function makeEntry(overrides: EntryOverrides = {}): SubagentRunRecord {
+  const { endedAt = 1_000, ...recordOverrides } = overrides;
   return {
     runId: "run-1",
     childSessionKey: "agent:main:subagent:child",
@@ -11,8 +16,8 @@ function makeEntry(overrides: Partial<SubagentRunRecord> = {}): SubagentRunRecor
     task: "test",
     cleanup: "keep",
     createdAt: 0,
-    endedAt: 1_000,
-    ...overrides,
+    execution: { status: "terminal", endedAt },
+    ...recordOverrides,
   };
 }
 
@@ -28,11 +33,12 @@ describe("resolveDeferredCleanupDecision", () => {
         Pick<Parameters<typeof resolveDeferredCleanupDecision>[0], "resolveAnnounceRetryDelayMs">
       >,
   ) {
+    // Fixed timing keeps expiry and backoff decisions independent from wall
+    // clock drift while still exercising production thresholds.
     return resolveDeferredCleanupDecision({
       now,
       announceExpiryMs: 5 * 60_000,
       announceCompletionHardExpiryMs: 30 * 60_000,
-      maxAnnounceRetryCount: 3,
       deferDescendantDelayMs: 1_000,
       resolveAnnounceRetryDelayMs: () => 2_000,
       ...overrides,
@@ -68,7 +74,10 @@ describe("resolveDeferredCleanupDecision", () => {
 
   it("uses retry backoff for completion-message flows once descendants are settled", () => {
     const decision = resolveDecision({
-      entry: makeEntry({ expectsCompletionMessage: true, announceRetryCount: 1 }),
+      entry: makeEntry({
+        expectsCompletionMessage: true,
+        delivery: { status: "pending", attemptCount: 1 },
+      }),
       activeDescendantRuns: 0,
       resolveAnnounceRetryDelayMs: (retryCount) => retryCount * 1_000,
     });
@@ -78,7 +87,10 @@ describe("resolveDeferredCleanupDecision", () => {
 
   it("uses retry backoff for non-completion flows so cleanup can settle after announce failures", () => {
     const decision = resolveDecision({
-      entry: makeEntry({ expectsCompletionMessage: false, announceRetryCount: 1 }),
+      entry: makeEntry({
+        expectsCompletionMessage: false,
+        delivery: { status: "not_required", attemptCount: 1 },
+      }),
       activeDescendantRuns: 0,
       resolveAnnounceRetryDelayMs: (retryCount) => retryCount * 1_000,
     });

@@ -1,7 +1,24 @@
+// Tests plugin activation boundaries during root package startup.
 import { describe, expect, it, vi } from "vitest";
-import { normalizeModelRef } from "./agents/model-selection-normalize.js";
+import { normalizeModelRef } from "./agents/model-ref-shared.js";
 import { isStaticallyChannelConfigured } from "./config/channel-configured-shared.js";
 import { parseBrowserMajorVersion } from "./plugin-sdk/browser-host-inspection.js";
+
+const testModelIdNormalization = {
+  providers: {
+    google: {
+      aliases: {
+        "gemini-3.1-pro": "gemini-3.1-pro-preview",
+        "gemini-3-pro-preview": "gemini-3.1-pro-preview",
+      },
+    },
+    xai: {
+      aliases: {
+        "grok-4-fast-reasoning": "grok-4-fast",
+      },
+    },
+  },
+};
 
 const loadBundledPluginPublicSurfaceModuleSync = vi.hoisted(() =>
   vi.fn((params: { artifactBasename: string }) => {
@@ -28,27 +45,11 @@ const loadPluginManifestRegistryForPluginRegistry = vi.hoisted(() =>
         channels: ["discord", "irc", "slack", "telegram"],
         providers: [],
         cliBackends: [],
-        channelEnvVars: {
-          discord: ["DISCORD_BOT_TOKEN"],
-          irc: ["IRC_HOST", "IRC_NICK"],
-          slack: ["SLACK_BOT_TOKEN"],
-          telegram: ["TELEGRAM_BOT_TOKEN"],
+        packageChannel: {
+          id: "discord",
+          configuredState: { env: { anyOf: ["DISCORD_BOT_TOKEN"] } },
         },
-        modelIdNormalization: {
-          providers: {
-            google: {
-              aliases: {
-                "gemini-3.1-pro": "gemini-3.1-pro-preview",
-                "gemini-3-pro-preview": "gemini-3.1-pro-preview",
-              },
-            },
-            xai: {
-              aliases: {
-                "grok-4-fast-reasoning": "grok-4-fast",
-              },
-            },
-          },
-        },
+        modelIdNormalization: testModelIdNormalization,
         skills: [],
         hooks: [],
         origin: "bundled",
@@ -135,7 +136,10 @@ describe("plugin activation boundary", () => {
       }),
     ).toBe(true);
     expect(isStaticallyChannelConfigured({}, "whatsapp", {})).toBe(false);
-    const staticNormalize = { allowPluginNormalization: false };
+    const staticNormalize = {
+      allowPluginNormalization: false,
+      manifestPlugins: [{ modelIdNormalization: testModelIdNormalization }],
+    };
     expect(normalizeModelRef("google", "gemini-3.1-pro", staticNormalize)).toEqual({
       provider: "google",
       model: "gemini-3.1-pro-preview",

@@ -1,3 +1,4 @@
+// Implements `openclaw agents list` text and JSON summaries.
 import { formatCliCommand } from "../cli/command-format.js";
 import { listRouteBindings } from "../config/bindings.js";
 import type { AgentRouteBinding } from "../config/types.js";
@@ -6,7 +7,6 @@ import { type RuntimeEnv, writeRuntimeJson } from "../runtime.js";
 import { defaultRuntime } from "../runtime.js";
 import { shortenHomePath } from "../utils.js";
 import { describeBinding } from "./agents.bindings.js";
-import { requireValidConfig } from "./agents.command-shared.js";
 import type { AgentSummary } from "./agents.config.js";
 import { buildAgentSummaries } from "./agents.config.js";
 import {
@@ -15,6 +15,7 @@ import {
   listProvidersForAgent,
   summarizeBindings,
 } from "./agents.providers.js";
+import { requireValidConfigSnapshot } from "./config-validation.js";
 
 type AgentsListOptions = {
   json?: boolean;
@@ -73,11 +74,12 @@ function formatSummary(summary: AgentSummary) {
   return lines.join("\n");
 }
 
+/** Print configured agent summaries with optional binding/provider detail enrichment. */
 export async function agentsListCommand(
   opts: AgentsListOptions,
   runtime: RuntimeEnv = defaultRuntime,
 ) {
-  const cfg = await requireValidConfig(runtime);
+  const cfg = await requireValidConfigSnapshot(runtime);
   if (!cfg) {
     return;
   }

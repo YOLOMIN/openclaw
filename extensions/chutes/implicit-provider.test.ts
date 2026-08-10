@@ -1,8 +1,10 @@
+// Chutes tests cover implicit provider plugin behavior.
 import { registerSingleProviderPlugin } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { resolveOAuthApiKeyMarker } from "openclaw/plugin-sdk/provider-auth";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import plugin from "./index.js";
 import { CHUTES_BASE_URL } from "./models.js";
+import { refreshChutesOAuthCredential } from "./oauth.js";
 
 const CHUTES_OAUTH_MARKER = resolveOAuthApiKeyMarker("chutes");
 
@@ -12,6 +14,14 @@ function restoreEnvVar(name: string, value: string | undefined): void {
   } else {
     process.env[name] = value;
   }
+}
+
+function jsonResponse(payload: unknown, init: ResponseInit = {}): Response {
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+    ...init,
+  });
 }
 
 async function runChutesCatalog(params: { apiKey?: string; discoveryApiKey?: string }) {
@@ -43,10 +53,9 @@ async function withRealChutesDiscovery<T>(
   delete process.env.VITEST;
   delete process.env.NODE_ENV;
 
-  const fetchMock = vi.fn().mockResolvedValue({
-    ok: true,
-    json: async () => ({ data: [{ id: "chutes/private-model" }] }),
-  });
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValue(jsonResponse({ data: [{ id: "chutes/private-model" }] }));
   globalThis.fetch = fetchMock as unknown as typeof fetch;
 
   try {
@@ -59,14 +68,16 @@ async function withRealChutesDiscovery<T>(
 }
 
 describe("chutes implicit provider auth mode", () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
   it("publishes the env vars used by core api-key auto-detection", async () => {
     const provider = await registerSingleProviderPlugin(plugin);
 
     expect(provider.envVars).toEqual(["CHUTES_API_KEY", "CHUTES_OAUTH_TOKEN"]);
+  });
+
+  it("registers plugin-owned OAuth refresh behavior", async () => {
+    const provider = await registerSingleProviderPlugin(plugin);
+
+    expect(provider.refreshOAuth).toBe(refreshChutesOAuthCredential);
   });
 
   it("does not publish a provider when no API key is resolved", async () => {
@@ -100,8 +111,10 @@ describe("chutes implicit provider auth mode", () => {
 
       const chutesCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("chutes.ai"));
       expect(chutesCalls.length).toBeGreaterThan(0);
-      const request = chutesCalls[0]?.[1] as { headers?: Record<string, string> } | undefined;
-      expect(request?.headers?.Authorization).toBe("Bearer my-chutes-access-token");
+      const request = chutesCalls[0]?.[1] as { headers?: HeadersInit } | undefined;
+      expect(new Headers(request?.headers).get("authorization")).toBe(
+        "Bearer my-chutes-access-token",
+      );
     });
   });
 });

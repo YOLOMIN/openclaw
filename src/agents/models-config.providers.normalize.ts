@@ -1,4 +1,8 @@
+/**
+ * Normalizes configured provider model rows for runtime/discovery use.
+ */
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { PluginManifestRecord, PluginManifestRegistry } from "../plugins/manifest-registry.js";
 import { ensureAuthProfileStore } from "./auth-profiles/store.js";
 import { normalizeConfiguredProviderCatalogModelId } from "./model-ref-shared.js";
 import {
@@ -19,6 +23,9 @@ type ModelsConfig = NonNullable<OpenClawConfig["models"]>;
 type ProviderModelConfig = NonNullable<
   NonNullable<ModelsConfig["providers"]>[string]["models"]
 >[number];
+type ProviderModelNormalizationOptions = {
+  manifestPlugins?: readonly Pick<PluginManifestRecord, "modelIdNormalization">[];
+};
 
 function getProviderModelId(model: ProviderModelConfig): string | undefined {
   return typeof model.id === "string" && model.id.trim() ? model.id : undefined;
@@ -45,6 +52,7 @@ function mergeNormalizedProviderModel(
 function normalizeProviderModelsForConfig(
   providerKey: string,
   provider: ProviderConfig,
+  options: ProviderModelNormalizationOptions = {},
 ): { provider: ProviderConfig; mutated: boolean } {
   if (!Array.isArray(provider.models) || provider.models.length === 0) {
     return { provider, mutated: false };
@@ -56,7 +64,9 @@ function normalizeProviderModelsForConfig(
   for (const model of provider.models) {
     const rawId = getProviderModelId(model);
     const normalizedId = rawId
-      ? normalizeConfiguredProviderCatalogModelId(providerKey, rawId)
+      ? normalizeConfiguredProviderCatalogModelId(providerKey, rawId, {
+          manifestPlugins: options.manifestPlugins,
+        })
       : rawId;
     const normalizedModel =
       normalizedId && normalizedId !== rawId ? { ...model, id: normalizedId } : model;
@@ -68,10 +78,10 @@ function normalizeProviderModelsForConfig(
       const existingIndex = seenById.get(id);
       if (existingIndex !== undefined) {
         mutated = true;
-        nextModels[existingIndex] = mergeNormalizedProviderModel(
-          nextModels[existingIndex],
-          normalizedModel,
-        );
+        const existing = nextModels.at(existingIndex);
+        if (existing) {
+          nextModels[existingIndex] = mergeNormalizedProviderModel(existing, normalizedModel);
+        }
         continue;
       }
       seenById.set(id, nextModels.length);
@@ -86,6 +96,7 @@ function normalizeProviderModelsForConfig(
 
 export function normalizeProviderCatalogModelsForConfig(
   providers: ModelsConfig["providers"],
+  options: ProviderModelNormalizationOptions = {},
 ): ModelsConfig["providers"] {
   if (!providers) {
     return providers;
@@ -94,7 +105,7 @@ export function normalizeProviderCatalogModelsForConfig(
   let mutated = false;
   const next: Record<string, ProviderConfig> = {};
   for (const [providerKey, provider] of Object.entries(providers)) {
-    const normalized = normalizeProviderModelsForConfig(providerKey, provider);
+    const normalized = normalizeProviderModelsForConfig(providerKey, provider, options);
     if (normalized.mutated) {
       mutated = true;
     }
@@ -112,6 +123,8 @@ export function normalizeProviders(params: {
   sourceProviders?: ModelsConfig["providers"];
   sourceSecretDefaults?: SecretDefaults;
   secretRefManagedProviders?: Set<string>;
+  manifestPlugins?: ProviderModelNormalizationOptions["manifestPlugins"];
+  manifestRegistry?: Pick<PluginManifestRegistry, "plugins">;
 }): ModelsConfig["providers"] {
   const { providers } = params;
   if (!providers) {
@@ -186,7 +199,7 @@ export function normalizeProviders(params: {
       );
     const profileApiKey = needsProfileApiKey ? resolveProfileApiKey(normalizedKey) : undefined;
     const providerApiKeyResolver = needsProfileApiKey
-      ? resolveProviderConfigApiKeyResolver(normalizedKey)
+      ? resolveProviderConfigApiKeyResolver(normalizedKey, undefined, params.manifestRegistry)
       : undefined;
     const providerWithApiKey = resolveMissingProviderApiKey({
       providerKey: normalizedKey,
@@ -204,6 +217,7 @@ export function normalizeProviders(params: {
     const providerSpecificNormalized = normalizeProviderSpecificConfig(
       normalizedKey,
       normalizedProvider,
+      params.manifestRegistry,
     );
     if (providerSpecificNormalized !== normalizedProvider) {
       mutated = true;
@@ -213,6 +227,9 @@ export function normalizeProviders(params: {
     const providerWithNormalizedModels = normalizeProviderModelsForConfig(
       normalizedKey,
       normalizedProvider,
+      {
+        manifestPlugins: params.manifestPlugins,
+      },
     );
     if (providerWithNormalizedModels.mutated) {
       mutated = true;

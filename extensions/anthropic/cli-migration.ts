@@ -1,21 +1,22 @@
+/**
+ * Claude CLI setup migration helpers. They rewrite legacy Claude CLI model refs
+ * to Anthropic refs while preserving runtime allowlist entries for CLI execution.
+ */
 import {
   CLAUDE_CLI_PROFILE_ID,
   type OpenClawConfig,
   type ProviderAuthResult,
 } from "openclaw/plugin-sdk/provider-auth";
-import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { resolveClaudeCliAnthropicModelRefs } from "./claude-model-refs.js";
 import {
-  readClaudeCliCredentialsForSetup,
-  readClaudeCliCredentialsForSetupNonInteractive,
-} from "./cli-auth-seam.js";
+  isRecord,
+  normalizeLowercaseStringOrEmpty,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
+import { resolveClaudeCliAnthropicModelRefs } from "./claude-model-refs.js";
+import type { readClaudeCliCredentialsForSetup } from "./cli-auth-seam.js";
 import { CLAUDE_CLI_BACKEND_ID, CLAUDE_CLI_DEFAULT_ALLOWLIST_REFS } from "./cli-shared.js";
 
 type AgentDefaultsModel = NonNullable<NonNullable<OpenClawConfig["agents"]>["defaults"]>["model"];
 type AgentDefaultsModels = NonNullable<NonNullable<OpenClawConfig["agents"]>["defaults"]>["models"];
-type AgentDefaultsRuntimePolicy = NonNullable<
-  NonNullable<OpenClawConfig["agents"]>["defaults"]
->["agentRuntime"];
 type ClaudeCliCredential = NonNullable<ReturnType<typeof readClaudeCliCredentialsForSetup>>;
 
 function toAnthropicModelRef(raw: string): string | null {
@@ -29,10 +30,6 @@ function toAnthropicRuntimeRefs(raw: string): string[] {
 function toAnthropicSelectedModelRef(raw: string): string | undefined {
   const resolved = resolveClaudeCliAnthropicModelRefs(raw);
   return resolved?.rewriteRef ?? resolved?.selectedRef;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function rewriteModelSelection(model: AgentDefaultsModel): {
@@ -122,8 +119,13 @@ function rewriteModelEntryMap(models: Record<string, unknown> | undefined): {
     if (converted === rawKey) {
       continue;
     }
-    if (!(converted in next)) {
-      next[converted] = value;
+    if (!Object.hasOwn(next, converted)) {
+      Object.defineProperty(next, converted, {
+        value,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
     }
     if (normalizeLowercaseStringOrEmpty(rawKey).startsWith(`${CLAUDE_CLI_BACKEND_ID}/`)) {
       delete next[rawKey];
@@ -152,20 +154,15 @@ function seedClaudeCliAllowlist(
     runtimeRefs.add(ref);
   }
   for (const ref of runtimeRefs) {
-    next[ref] = modelEntryWithClaudeCliRuntime(next[ref]);
+    const current = Object.hasOwn(next, ref) ? next[ref] : undefined;
+    Object.defineProperty(next, ref, {
+      value: modelEntryWithClaudeCliRuntime(current),
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
   }
   return next;
-}
-
-function selectClaudeCliRuntime(agentRuntime: AgentDefaultsRuntimePolicy | undefined) {
-  const currentRuntime = agentRuntime?.id?.trim();
-  if (currentRuntime && currentRuntime !== "auto") {
-    return agentRuntime;
-  }
-  return {
-    ...agentRuntime,
-    id: CLAUDE_CLI_BACKEND_ID,
-  };
 }
 
 function modelEntryWithClaudeCliRuntime(entry: unknown): Record<string, unknown> {
@@ -181,14 +178,6 @@ function modelEntryWithClaudeCliRuntime(entry: unknown): Record<string, unknown>
     id: CLAUDE_CLI_BACKEND_ID,
   };
   return base;
-}
-
-export function hasClaudeCliAuth(options?: { allowKeychainPrompt?: boolean }): boolean {
-  return Boolean(
-    options?.allowKeychainPrompt === false
-      ? readClaudeCliCredentialsForSetupNonInteractive()
-      : readClaudeCliCredentialsForSetup(),
-  );
 }
 
 function buildClaudeCliAuthProfiles(
@@ -211,6 +200,9 @@ function buildClaudeCliAuthProfiles(
       },
     ];
   }
+  if (credential.type === "api_key_helper") {
+    return [];
+  }
   return [
     {
       profileId: CLAUDE_CLI_PROFILE_ID,
@@ -224,6 +216,7 @@ function buildClaudeCliAuthProfiles(
   ];
 }
 
+/** Build the config migration result for adopting Claude CLI-backed Anthropic defaults. */
 export function buildAnthropicCliMigrationResult(
   config: OpenClawConfig,
   credential?: ClaudeCliCredential | null,
@@ -239,7 +232,7 @@ export function buildAnthropicCliMigrationResult(
     ...rewrittenModels.runtimeRefs,
     ...rewrittenModels.migrated,
   ]);
-  const defaultModel = rewrittenModel.primary ?? "anthropic/claude-opus-4-7";
+  const defaultModel = rewrittenModel.primary ?? "anthropic/claude-opus-5";
 
   return {
     profiles: buildClaudeCliAuthProfiles(credential),
@@ -247,7 +240,6 @@ export function buildAnthropicCliMigrationResult(
       agents: {
         defaults: {
           ...(rewrittenModel.changed ? { model: rewrittenModel.value } : {}),
-          agentRuntime: selectClaudeCliRuntime(defaults?.agentRuntime),
           models: nextModels,
         },
       },

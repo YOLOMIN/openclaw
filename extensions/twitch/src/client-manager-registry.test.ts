@@ -1,8 +1,9 @@
+// Twitch tests cover client manager registry plugin behavior.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  clearRegistryForTest,
   getClientManager,
   getOrCreateClientManager,
+  removeClientManager,
 } from "./client-manager-registry.js";
 import type { ChannelLogSink } from "./types.js";
 
@@ -17,17 +18,17 @@ function makeLogger(): ChannelLogSink {
 
 describe("client manager registry", () => {
   afterEach(async () => {
-    await clearRegistryForTest();
+    await removeClientManager("default");
   });
 
-  it("clears cached managers for hot module test isolation", async () => {
+  it("removes cached managers even when disconnectAll rejects", async () => {
     const firstManager = getOrCreateClientManager("default", makeLogger());
-    const disconnectAll = vi.spyOn(firstManager, "disconnectAll");
+    const disconnectError = new Error("disconnect failed");
+    const disconnectAll = vi
+      .spyOn(firstManager, "disconnectAll")
+      .mockRejectedValueOnce(disconnectError);
 
-    expect(getClientManager("default")).toBe(firstManager);
-    expect(getOrCreateClientManager("default", makeLogger())).toBe(firstManager);
-
-    await clearRegistryForTest();
+    await expect(removeClientManager("default")).rejects.toBe(disconnectError);
 
     expect(disconnectAll).toHaveBeenCalledOnce();
     expect(getClientManager("default")).toBeUndefined();

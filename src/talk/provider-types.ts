@@ -1,3 +1,4 @@
+// Talk provider types describe realtime voice provider configuration and APIs.
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { TalkTransport } from "./talk-events.js";
 
@@ -62,11 +63,15 @@ export type RealtimeVoiceBridgeEvent = {
   direction: "client" | "server";
   type: string;
   detail?: string;
+  itemId?: string;
+  responseId?: string;
 };
+
+export type RealtimeVoiceAudioClearReason = "barge-in";
 
 export type RealtimeVoiceBridgeCallbacks = {
   onAudio: (audio: Buffer) => void;
-  onClearAudio: () => void;
+  onClearAudio: (reason?: RealtimeVoiceAudioClearReason) => void;
   onMark?: (markName: string) => void;
   onTranscript?: (role: RealtimeVoiceRole, text: string, isFinal: boolean) => void;
   onEvent?: (event: RealtimeVoiceBridgeEvent) => void;
@@ -84,6 +89,8 @@ export type RealtimeVoiceProviderCapabilities = {
   outputAudioFormats: RealtimeVoiceAudioFormat[];
   supportsBrowserSession?: boolean;
   supportsBargeIn?: boolean;
+  /** True when provider VAD reports confirmed interruptions through onClearAudio("barge-in"). */
+  handlesInputAudioBargeIn?: boolean;
   supportsToolCalls?: boolean;
   supportsVideoFrames?: boolean;
   supportsSessionResumption?: boolean;
@@ -99,14 +106,24 @@ export type RealtimeVoiceProviderConfiguredContext = {
   providerConfig: RealtimeVoiceProviderConfig;
 };
 
+export type RealtimeVoiceAgentConsultRunner = (params: {
+  prompt: string;
+  signal?: AbortSignal;
+}) => Promise<{ text: string }>;
+
 export type RealtimeVoiceBridgeCreateRequest = RealtimeVoiceBridgeCallbacks & {
   cfg?: OpenClawConfig;
+  /** Host-selected agent scope for provider auth and agent-owned bridge state. */
+  agentId?: string;
   providerConfig: RealtimeVoiceProviderConfig;
   audioFormat?: RealtimeVoiceAudioFormat;
   instructions?: string;
+  language?: string;
   autoRespondToAudio?: boolean;
   interruptResponseOnInputAudio?: boolean;
   tools?: RealtimeVoiceTool[];
+  /** Host-injected agent delegation runner for provider-owned realtime control channels. */
+  runAgentConsult?: RealtimeVoiceAgentConsultRunner;
 };
 
 export type RealtimeVoiceBrowserSessionCreateRequest = {
@@ -120,6 +137,18 @@ export type RealtimeVoiceBrowserSessionCreateRequest = {
   silenceDurationMs?: number;
   prefixPaddingMs?: number;
   reasoningEffort?: string;
+  /** Host-injected agent delegation runner for provider-owned realtime control channels. */
+  runAgentConsult?: RealtimeVoiceAgentConsultRunner;
+  /** Host-owned control callbacks for browser media sessions whose provider wire stays server-side. */
+  gatewayControl?: RealtimeVoiceGatewayControl;
+};
+
+/** Narrow host/plugin seam for Gateway-owned control of a client-owned media session. */
+export type RealtimeVoiceGatewayControl = Omit<
+  RealtimeVoiceBridgeCallbacks,
+  "onAudio" | "onClearAudio" | "onMark"
+> & {
+  bindBridge: (bridge: RealtimeVoiceBridge) => void;
 };
 
 export type RealtimeVoiceBrowserAudioContract = {
@@ -129,7 +158,7 @@ export type RealtimeVoiceBrowserAudioContract = {
   outputSampleRateHz: number;
 };
 
-export type RealtimeVoiceBrowserWebRtcSdpSession = {
+type RealtimeVoiceBrowserWebRtcSdpSession = {
   provider: RealtimeVoiceProviderId;
   transport: "webrtc";
   clientSecret: string;
@@ -140,7 +169,7 @@ export type RealtimeVoiceBrowserWebRtcSdpSession = {
   expiresAt?: number;
 };
 
-export type RealtimeVoiceBrowserJsonPcmWebSocketSession = {
+type RealtimeVoiceBrowserJsonPcmWebSocketSession = {
   provider: RealtimeVoiceProviderId;
   transport: "provider-websocket";
   protocol: string;
@@ -153,7 +182,7 @@ export type RealtimeVoiceBrowserJsonPcmWebSocketSession = {
   expiresAt?: number;
 };
 
-export type RealtimeVoiceBrowserGatewayRelaySession = {
+type RealtimeVoiceBrowserGatewayRelaySession = {
   provider: RealtimeVoiceProviderId;
   transport: "gateway-relay";
   relaySessionId: string;
@@ -163,7 +192,7 @@ export type RealtimeVoiceBrowserGatewayRelaySession = {
   expiresAt?: number;
 };
 
-export type RealtimeVoiceBrowserManagedRoomSession = {
+type RealtimeVoiceBrowserManagedRoomSession = {
   provider: RealtimeVoiceProviderId;
   transport: "managed-room";
   roomUrl: string;
@@ -181,14 +210,29 @@ export type RealtimeVoiceBrowserSession =
 
 export type RealtimeVoiceBridge = {
   supportsToolResultContinuation?: boolean;
+  /** False when the provider cannot accept a tool result without starting a response. */
+  supportsToolResultSuppression?: boolean;
+  /** Per-session override for provider-confirmed input-audio barge-in handling. */
+  handlesInputAudioBargeIn?: boolean;
   connect(): Promise<void>;
   sendAudio(audio: Buffer): void;
   setMediaTimestamp(ts: number): void;
-  sendUserMessage?(text: string): void;
+  sendUserMessage?(
+    text: string,
+    options?: { toolChoice?: { type: "function"; name: string } },
+  ): void;
   triggerGreeting?(instructions?: string): void;
   handleBargeIn?(options?: RealtimeVoiceBargeInOptions): void;
-  submitToolResult(callId: string, result: unknown, options?: RealtimeVoiceToolResultOptions): void;
-  acknowledgeMark(): void;
+  /**
+   * Returns void when submission completes synchronously, or a Promise that resolves at the
+   * asynchronous completion boundary exposed by the provider and rejects on submission failure.
+   */
+  submitToolResult(
+    callId: string,
+    result: unknown,
+    options?: RealtimeVoiceToolResultOptions,
+  ): void | Promise<void>;
+  acknowledgeMark(markName?: string): void;
   close(): void;
   isConnected(): boolean;
 };

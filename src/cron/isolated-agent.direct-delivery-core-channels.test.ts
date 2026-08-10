@@ -1,8 +1,14 @@
+// Direct delivery tests cover isolated agent delivery through core channel targets.
 import "./isolated-agent.mocks.js";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runSubagentAnnounceFlow } from "../agents/subagent-announce.js";
-import type { ChannelOutboundAdapter, ChannelOutboundContext } from "../channels/plugins/types.js";
+import type {
+  ChannelOutboundAdapter,
+  ChannelOutboundContext,
+} from "../channels/plugins/types.adapters.js";
 import type { CliDeps } from "../cli/deps.js";
+import { clearRuntimeConfigSnapshot, setRuntimeConfigSnapshot } from "../config/config.js";
+import { callGateway } from "../gateway/call.js";
 import { resolveOutboundSendDep } from "../infra/outbound/send-deps.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
 import { createOutboundTestPlugin, createTestRegistry } from "../test-utils/channel-plugins.js";
@@ -67,6 +73,7 @@ async function runExplicitAnnounceTurn(params: {
   cfg: ReturnType<typeof makeCfg>;
   deps: CliDeps;
   channel: ChannelCase["channel"];
+  deleteAfterRun?: boolean;
   to: string;
 }) {
   return await runCronIsolatedAgentTurn({
@@ -74,6 +81,7 @@ async function runExplicitAnnounceTurn(params: {
     deps: params.deps,
     job: {
       ...makeJob({ kind: "agentTurn", message: "do it" }),
+      ...(params.deleteAfterRun === true ? { deleteAfterRun: true } : {}),
       delivery: {
         mode: "announce",
         channel: params.channel,
@@ -114,6 +122,7 @@ function expectCoreChannelSendCall({
 
 async function expectCoreChannelAnnounceDelivery({
   assertSend,
+  deleteAfterRun,
   meta,
   payloads,
   testCase,
@@ -122,6 +131,7 @@ async function expectCoreChannelAnnounceDelivery({
   meta?: Parameters<typeof mockAgentPayloads>[1];
   payloads: Parameters<typeof mockAgentPayloads>[0];
   testCase: ChannelCase;
+  deleteAfterRun?: boolean;
 }): Promise<void> {
   await withTempCronHome(async (home) => {
     const storePath = await writeSessionStore(home, { lastProvider: "webchat", lastTo: "" });
@@ -137,6 +147,7 @@ async function expectCoreChannelAnnounceDelivery({
       cfg,
       deps,
       channel: testCase.channel,
+      deleteAfterRun,
       to: testCase.to,
     });
 
@@ -249,51 +260,98 @@ async function expectTelegramAnnounceDelivery({
   });
 }
 
+function setupCoreChannelMocks(): void {
+  setupIsolatedAgentTurnMocks({ fast: true });
+  setActivePluginRegistry(
+    createTestRegistry([
+      {
+        pluginId: "slack",
+        plugin: createOutboundTestPlugin({
+          id: "slack",
+          outbound: createCliDelegatingOutbound({ channel: "slack" }),
+        }),
+        source: "test",
+      },
+      {
+        pluginId: "discord",
+        plugin: createOutboundTestPlugin({
+          id: "discord",
+          outbound: createCliDelegatingOutbound({
+            channel: "discord",
+            preferFinalAssistantVisibleText: true,
+          }),
+        }),
+        source: "test",
+      },
+      {
+        pluginId: "whatsapp",
+        plugin: createOutboundTestPlugin({
+          id: "whatsapp",
+          outbound: createCliDelegatingOutbound({
+            channel: "whatsapp",
+            deliveryMode: "gateway",
+            resolveTarget: identityResolveTarget,
+          }),
+        }),
+        source: "test",
+      },
+      {
+        pluginId: "imessage",
+        plugin: createOutboundTestPlugin({
+          id: "imessage",
+          outbound: createCliDelegatingOutbound({ channel: "imessage" }),
+        }),
+        source: "test",
+      },
+    ]),
+  );
+}
+
 describe("runCronIsolatedAgentTurn core-channel direct delivery", () => {
-  beforeEach(() => {
-    setupIsolatedAgentTurnMocks({ fast: true });
-    setActivePluginRegistry(
-      createTestRegistry([
-        {
-          pluginId: "slack",
-          plugin: createOutboundTestPlugin({
-            id: "slack",
-            outbound: createCliDelegatingOutbound({ channel: "slack" }),
-          }),
-          source: "test",
-        },
-        {
-          pluginId: "discord",
-          plugin: createOutboundTestPlugin({
-            id: "discord",
-            outbound: createCliDelegatingOutbound({
-              channel: "discord",
-              preferFinalAssistantVisibleText: true,
-            }),
-          }),
-          source: "test",
-        },
-        {
-          pluginId: "whatsapp",
-          plugin: createOutboundTestPlugin({
-            id: "whatsapp",
-            outbound: createCliDelegatingOutbound({
-              channel: "whatsapp",
-              deliveryMode: "gateway",
-              resolveTarget: identityResolveTarget,
-            }),
-          }),
-          source: "test",
-        },
-        {
-          pluginId: "imessage",
-          plugin: createOutboundTestPlugin({
-            id: "imessage",
-            outbound: createCliDelegatingOutbound({ channel: "imessage" }),
-          }),
-          source: "test",
-        },
-      ]),
+  beforeAll(async () => {
+    setupCoreChannelMocks();
+    const slack = CASES[0];
+    if (!slack) {
+      throw new Error("expected Slack channel case");
+    }
+    await expectCoreChannelAnnounceDelivery({
+      testCase: slack,
+      payloads: [{ text: "warm runtime" }],
+      assertSend: () => {},
+    });
+    clearRuntimeConfigSnapshot();
+  });
+
+  beforeEach(setupCoreChannelMocks);
+
+  afterEach(() => {
+    clearRuntimeConfigSnapshot();
+  });
+
+  it("delivers only the final Slack result after an earlier heartbeat acknowledgement", async () => {
+    const slack = CASES[0];
+    if (!slack) {
+      throw new Error("expected Slack channel case");
+    }
+    const finalResult = "Critical deployment failure: database unavailable.";
+    await expectCoreChannelAnnounceDelivery({
+      testCase: slack,
+      deleteAfterRun: true,
+      payloads: [{ text: "HEARTBEAT_OK" }, { text: finalResult }],
+      meta: { meta: makeRunMeta(finalResult) },
+      assertSend: (sendFn, cfg) => {
+        expect(sendFn).toHaveBeenCalledTimes(1);
+        expectCoreChannelSendCall({
+          cfg,
+          expectedText: finalResult,
+          expectedTo: slack.expectedTo,
+          sendFn,
+          sentAt: 0,
+        });
+      },
+    });
+    expect(callGateway).toHaveBeenCalledWith(
+      expect.objectContaining({ method: "sessions.delete" }),
     );
   });
 
@@ -316,6 +374,51 @@ describe("runCronIsolatedAgentTurn core-channel direct delivery", () => {
     });
 
     if (testCase.channel === "discord") {
+      it("keeps isolated Discord delivery on the active runtime snapshot after agent-default derivation", async () => {
+        await withTempCronHome(async (home) => {
+          const storePath = await writeSessionStore(home, { lastProvider: "webchat", lastTo: "" });
+          const sourceCfg = makeCfg(home, storePath, {
+            channels: {
+              discord: {
+                accounts: {
+                  default: {
+                    token: { provider: "default", source: "env", id: "DISCORD_BOT_TOKEN" },
+                  },
+                },
+              },
+            },
+          });
+          const runtimeCfg = makeCfg(home, storePath, {
+            channels: {
+              discord: {
+                accounts: { default: { token: "resolved-discord-token" } },
+              },
+            },
+          });
+          setRuntimeConfigSnapshot(runtimeCfg, sourceCfg);
+          const deps = createCliDeps();
+          mockAgentPayloads([{ text: "hello from cron" }]);
+
+          const res = await runExplicitAnnounceTurn({
+            cfg: sourceCfg,
+            deps,
+            channel: "discord",
+            to: testCase.to,
+          });
+
+          expect(res.status).toBe("ok");
+          expect(res.delivered).toBe(true);
+          expect(deps.sendMessageDiscord).toHaveBeenCalledTimes(1);
+          expect(deps.sendMessageDiscord).toHaveBeenCalledWith(
+            testCase.expectedTo,
+            "hello from cron",
+            expect.objectContaining({
+              cfg: expect.objectContaining({ channels: runtimeCfg.channels }),
+            }),
+          );
+        });
+      });
+
       it("collapses Discord text-only announce delivery to the final assistant text", async () => {
         await expectCoreChannelAnnounceDelivery({
           testCase,
@@ -401,6 +504,55 @@ describe("runCronIsolatedAgentTurn telegram forum-topic direct delivery", () => 
         text: "topic 47 completion",
         messageThreadId: 47,
       },
+    });
+  });
+
+  it("does not report delivered when telegram announce produces no platform result", async () => {
+    await withTempCronHome(async (home) => {
+      const storePath = await writeSessionStore(home, { lastProvider: "webchat", lastTo: "" });
+      const sendText = vi.fn(async () => ({ channel: "telegram", messageId: "" }));
+      setActivePluginRegistry(
+        createTestRegistry([
+          {
+            pluginId: "telegram",
+            plugin: createOutboundTestPlugin({
+              id: "telegram",
+              outbound: {
+                deliveryMode: "direct",
+                preferFinalAssistantVisibleText: true,
+                sendText,
+                resolveTarget: ({ to }) =>
+                  to?.trim()
+                    ? { ok: true, to: to.trim() }
+                    : { ok: false, error: new Error("target is required") },
+              },
+              messaging: {
+                parseExplicitTarget: ({ raw }) => ({ to: raw.trim() }),
+              },
+            }),
+            source: "test",
+          },
+        ]),
+      );
+      const deps = createCliDeps();
+      mockAgentPayloads([{ text: "cron message with no platform receipt" }]);
+
+      const res = await runTelegramAnnounceTurn({
+        home,
+        storePath,
+        deps,
+        delivery: { mode: "announce", channel: "telegram", to: "123" },
+      });
+
+      expect(res.status).toBe("ok");
+      expect(res.delivered).toBe(false);
+      expect(res.deliveryAttempted).toBe(true);
+      expect(res.delivery).toMatchObject({
+        fallbackUsed: true,
+        delivered: false,
+      });
+      expect(sendText).toHaveBeenCalledTimes(1);
+      expect(deps.sendMessageTelegram).not.toHaveBeenCalled();
     });
   });
 

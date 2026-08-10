@@ -1,3 +1,4 @@
+// Skills CLI command tests cover skill command registration and subcommand behavior.
 import { Command } from "commander";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { registerSkillsCli } from "./skills-cli.js";
@@ -71,18 +72,27 @@ const mocks = vi.hoisted(() => {
     return skillStatusReportFixture;
   });
   return {
-    loadConfigMock: vi.fn(() => ({})),
-    resolveDefaultAgentIdMock: vi.fn((configForTest: unknown) => "main"),
+    callGatewayMock: vi.fn(),
+    loadConfigMock: vi.fn((_options?: unknown) => ({})),
+    resolveDefaultAgentIdMock: vi.fn((_configForTest: unknown) => "main"),
     resolveAgentIdByWorkspacePathMock: vi.fn(
-      (configForTest: unknown, _workspacePath: string): string | undefined => undefined,
+      (_configForTest: unknown, _workspacePath: string): string | undefined => undefined,
     ),
     resolveAgentWorkspaceDirMock: vi.fn(
-      (configForTest: unknown, _agentId: string) => "/tmp/workspace",
+      (_configForTest: unknown, _agentId: string) => "/tmp/workspace",
     ),
     searchSkillsFromClawHubMock: vi.fn(),
     installSkillFromClawHubMock: vi.fn(),
+    installSkillFromSourceMock: vi.fn(),
     updateSkillsFromClawHubMock: vi.fn(),
     readTrackedClawHubSkillSlugsMock: vi.fn(),
+    readVerifiedClawHubSkillSourceUrlMock: vi.fn(),
+    resolveClawHubSkillVerificationTargetMock: vi.fn(),
+    readClawHubSkillsLockfileStatusSyncMock: vi.fn((..._args: unknown[]) => ({ kind: "missing" })),
+    resolveClawHubSkillStatusLinkSyncMock: vi.fn(),
+    resolveLocalSkillCardStatusSyncMock: vi.fn(),
+    fetchClawHubSkillVerificationMock: vi.fn(),
+    fetchClawHubSkillCardMock: vi.fn(),
     buildWorkspaceSkillStatusMock,
     skillStatusReportFixture,
     defaultRuntime,
@@ -93,14 +103,23 @@ const mocks = vi.hoisted(() => {
 });
 
 const {
+  callGatewayMock,
   loadConfigMock,
   resolveDefaultAgentIdMock,
   resolveAgentIdByWorkspacePathMock,
   resolveAgentWorkspaceDirMock,
   searchSkillsFromClawHubMock,
   installSkillFromClawHubMock,
+  installSkillFromSourceMock,
   updateSkillsFromClawHubMock,
   readTrackedClawHubSkillSlugsMock,
+  readVerifiedClawHubSkillSourceUrlMock,
+  resolveClawHubSkillVerificationTargetMock,
+  readClawHubSkillsLockfileStatusSyncMock,
+  resolveClawHubSkillStatusLinkSyncMock,
+  resolveLocalSkillCardStatusSyncMock,
+  fetchClawHubSkillVerificationMock,
+  fetchClawHubSkillCardMock,
   buildWorkspaceSkillStatusMock,
   skillStatusReportFixture,
   defaultRuntime,
@@ -108,6 +127,24 @@ const {
   runtimeStdout,
   runtimeErrors,
 } = mocks;
+
+function primeSkillVerification(overrides: Record<string, unknown> = {}) {
+  return fetchClawHubSkillVerificationMock.mockResolvedValueOnce({
+    schema: "clawhub.skill.verify.v1",
+    ok: true,
+    decision: "pass",
+    reasons: [],
+    skill: { slug: "agentreceipt" },
+    publisher: null,
+    version: { version: "1.2.3" },
+    card: { available: true },
+    artifact: null,
+    provenance: null,
+    security: { status: "clean" },
+    signature: { status: "unsigned" },
+    ...overrides,
+  });
+}
 
 function mockCall(mock: unknown, index = 0): Array<unknown> {
   const calls = (mock as { mock?: { calls?: Array<Array<unknown>> } }).mock?.calls ?? [];
@@ -148,8 +185,35 @@ function expectStatusWorkspaceCall(workspaceDir: string): void {
   expectObjectFields(options, { config: {} });
 }
 
+function primeCalendarInstall(workspaceDir = "/tmp/workspace"): void {
+  installSkillFromClawHubMock.mockResolvedValue({
+    ok: true,
+    slug: "calendar",
+    version: "1.2.3",
+    targetDir: `${workspaceDir}/skills/calendar`,
+  });
+}
+
+function primeCalendarUpdate(workspaceDir = "/tmp/workspace"): void {
+  readTrackedClawHubSkillSlugsMock.mockResolvedValue(["calendar"]);
+  updateSkillsFromClawHubMock.mockResolvedValue([
+    {
+      ok: true,
+      slug: "calendar",
+      previousVersion: "1.2.2",
+      version: "1.2.3",
+      changed: true,
+      targetDir: `${workspaceDir}/skills/calendar`,
+    },
+  ]);
+}
+
 vi.mock("../runtime.js", () => ({
   defaultRuntime: mocks.defaultRuntime,
+}));
+
+vi.mock("../gateway/call.js", () => ({
+  callGateway: (...args: unknown[]) => mocks.callGatewayMock(...args),
 }));
 
 vi.mock("../utils.js", async (importOriginal) => ({
@@ -158,7 +222,7 @@ vi.mock("../utils.js", async (importOriginal) => ({
 }));
 
 vi.mock("../config/config.js", () => ({
-  getRuntimeConfig: () => mocks.loadConfigMock(),
+  getRuntimeConfig: (...args: unknown[]) => mocks.loadConfigMock(...args),
   loadConfig: () => mocks.loadConfigMock(),
 }));
 
@@ -170,15 +234,44 @@ vi.mock("../agents/agent-scope.js", () => ({
     mocks.resolveAgentWorkspaceDirMock(config, agentId),
 }));
 
-vi.mock("../agents/skills-clawhub.js", () => ({
+vi.mock("../skills/lifecycle/clawhub.js", () => ({
   searchSkillsFromClawHub: (...args: unknown[]) => mocks.searchSkillsFromClawHubMock(...args),
   installSkillFromClawHub: (...args: unknown[]) => mocks.installSkillFromClawHubMock(...args),
   updateSkillsFromClawHub: (...args: unknown[]) => mocks.updateSkillsFromClawHubMock(...args),
   readTrackedClawHubSkillSlugs: (...args: unknown[]) =>
     mocks.readTrackedClawHubSkillSlugsMock(...args),
+  readVerifiedClawHubSkillSourceUrl: (...args: unknown[]) =>
+    mocks.readVerifiedClawHubSkillSourceUrlMock(...args),
+  resolveClawHubSkillVerificationTarget: (...args: unknown[]) =>
+    mocks.resolveClawHubSkillVerificationTargetMock(...args),
+  readClawHubSkillsLockfileStatusSync: (...args: unknown[]) =>
+    mocks.readClawHubSkillsLockfileStatusSyncMock(...args),
+  resolveClawHubSkillStatusLinkSync: (...args: unknown[]) =>
+    mocks.resolveClawHubSkillStatusLinkSyncMock(...args),
+  resolveLocalSkillCardStatusSync: (...args: unknown[]) =>
+    mocks.resolveLocalSkillCardStatusSyncMock(...args),
 }));
 
-vi.mock("../agents/skills-status.js", () => ({
+vi.mock("../infra/clawhub.js", () => ({
+  CLAWHUB_SKILLS_SH_TRUST_LABEL: "Not scanned by ClawHub",
+  CLAWHUB_SKILLS_SH_TRUST_STATE: "not-scanned-by-clawhub",
+  fetchClawHubSkillVerification: (...args: unknown[]) =>
+    mocks.fetchClawHubSkillVerificationMock(...args),
+  fetchClawHubSkillCard: (...args: unknown[]) => mocks.fetchClawHubSkillCardMock(...args),
+}));
+
+vi.mock("../skills/lifecycle/source-install.js", () => ({
+  installSkillFromSource: (...args: unknown[]) => mocks.installSkillFromSourceMock(...args),
+  isSkillSourceInstallSpec: (raw: string) =>
+    raw.startsWith("git:") ||
+    raw.startsWith("./") ||
+    raw.startsWith("../") ||
+    raw.startsWith("~/") ||
+    raw.startsWith("/"),
+}));
+
+vi.mock("../skills/discovery/status.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../skills/discovery/status.js")>()),
   buildWorkspaceSkillStatus: (workspaceDir: string, options?: unknown) =>
     mocks.buildWorkspaceSkillStatusMock(workspaceDir, options),
 }));
@@ -206,16 +299,26 @@ describe("skills cli commands", () => {
     runtimeLogs.length = 0;
     runtimeStdout.length = 0;
     runtimeErrors.length = 0;
+    callGatewayMock.mockReset();
     loadConfigMock.mockReset();
     resolveDefaultAgentIdMock.mockReset();
     resolveAgentIdByWorkspacePathMock.mockReset();
     resolveAgentWorkspaceDirMock.mockReset();
     searchSkillsFromClawHubMock.mockReset();
     installSkillFromClawHubMock.mockReset();
+    installSkillFromSourceMock.mockReset();
     updateSkillsFromClawHubMock.mockReset();
     readTrackedClawHubSkillSlugsMock.mockReset();
+    readVerifiedClawHubSkillSourceUrlMock.mockReset();
+    resolveClawHubSkillVerificationTargetMock.mockReset();
+    readClawHubSkillsLockfileStatusSyncMock.mockReset();
+    resolveClawHubSkillStatusLinkSyncMock.mockReset();
+    resolveLocalSkillCardStatusSyncMock.mockReset();
+    fetchClawHubSkillVerificationMock.mockReset();
+    fetchClawHubSkillCardMock.mockReset();
     buildWorkspaceSkillStatusMock.mockReset();
 
+    callGatewayMock.mockRejectedValue(new Error("gateway unavailable"));
     loadConfigMock.mockReturnValue({});
     resolveDefaultAgentIdMock.mockReturnValue("main");
     resolveAgentIdByWorkspacePathMock.mockReturnValue(undefined);
@@ -225,8 +328,51 @@ describe("skills cli commands", () => {
       ok: false,
       error: "install disabled in test",
     });
+    installSkillFromSourceMock.mockResolvedValue({
+      ok: false,
+      error: "source install disabled in test",
+    });
     updateSkillsFromClawHubMock.mockResolvedValue([]);
     readTrackedClawHubSkillSlugsMock.mockResolvedValue([]);
+    readVerifiedClawHubSkillSourceUrlMock.mockReturnValue(undefined);
+    readClawHubSkillsLockfileStatusSyncMock.mockReturnValue({ kind: "missing" });
+    resolveClawHubSkillStatusLinkSyncMock.mockReturnValue(undefined);
+    resolveLocalSkillCardStatusSyncMock.mockReturnValue(undefined);
+    resolveClawHubSkillVerificationTargetMock.mockResolvedValue({
+      ok: true,
+      slug: "agentreceipt",
+      baseUrl: "https://private.example.com/clawhub",
+      version: "1.2.3",
+      tag: undefined,
+      resolution: {
+        source: "installed",
+        selector: "installed-version",
+        registry: "https://private.example.com/clawhub",
+        skillDir: "/tmp/workspace/skills/agentreceipt",
+        installedVersion: "1.2.3",
+      },
+    });
+    fetchClawHubSkillVerificationMock.mockResolvedValue({
+      schema: "clawhub.skill.verify.v1",
+      ok: true,
+      decision: "pass",
+      reasons: [],
+      skill: { slug: "agentreceipt", displayName: "Agent Receipt" },
+      publisher: { handle: "openclaw" },
+      version: { version: "1.2.3" },
+      card: {
+        available: true,
+        url: "https://private.example.com/clawhub/api/v1/skills/agentreceipt/card?version=1.2.3",
+      },
+      artifact: {
+        sourceFingerprint: "source-fingerprint",
+        bundleFingerprints: ["generated-bundle-fingerprint"],
+      },
+      provenance: null,
+      security: { status: "clean" },
+      signature: { status: "unsigned" },
+    });
+    fetchClawHubSkillCardMock.mockResolvedValue("# Agent Receipt\n\nGenerated by ClawHub.\n");
     buildWorkspaceSkillStatusMock.mockReturnValue(skillStatusReportFixture);
     defaultRuntime.log.mockClear();
     defaultRuntime.error.mockClear();
@@ -250,13 +396,19 @@ describe("skills cli commands", () => {
     );
   }
 
-  it("searches ClawHub skills from the native CLI", async () => {
+  it("distinguishes duplicate ClawHub skill slugs by owner", async () => {
     searchSkillsFromClawHubMock.mockResolvedValue([
       {
         slug: "calendar",
+        ownerHandle: "demo-owner",
         displayName: "Calendar",
         summary: "CalDAV helpers",
         version: "1.2.3",
+      },
+      {
+        slug: "calendar",
+        ownerHandle: "work-owner",
+        displayName: "Team Calendar",
       },
     ]);
 
@@ -266,19 +418,94 @@ describe("skills cli commands", () => {
       query: "calendar",
       limit: undefined,
     });
-    expect(
-      runtimeLogs.some((line) => line.includes("calendar v1.2.3  Calendar")),
-      "search result log",
-    ).toBe(true);
+    expect(runtimeLogs).toEqual([
+      "@demo-owner/calendar v1.2.3  Calendar  CalDAV helpers",
+      "@work-owner/calendar  Team Calendar",
+    ]);
+  });
+
+  it("keeps bare skill slugs when ClawHub omits the owner", async () => {
+    searchSkillsFromClawHubMock.mockResolvedValue([
+      {
+        slug: "legacy-calendar",
+        displayName: "Legacy Calendar",
+      },
+    ]);
+
+    await runCommand(["skills", "search", "calendar"]);
+
+    expect(runtimeLogs).toEqual(["legacy-calendar  Legacy Calendar"]);
+  });
+
+  it("shows skills.sh entries in normal ClawHub search results", async () => {
+    searchSkillsFromClawHubMock.mockResolvedValue([
+      {
+        slug: "weather",
+        installRef: "skills-sh:openclaw/skills/weather",
+        trustState: "not-scanned-by-clawhub",
+        displayName: "Weather",
+        summary: "Forecast helpers",
+      },
+    ]);
+
+    await runCommand(["skills", "search", "weather"]);
+
+    expect(searchSkillsFromClawHubMock).toHaveBeenCalledWith({
+      query: "weather",
+      limit: undefined,
+    });
+    expect(runtimeLogs).toEqual([
+      "skills-sh:openclaw/skills/weather  Weather  Forecast helpers  Not scanned by ClawHub",
+    ]);
+  });
+
+  it("keeps multiline ClawHub search metadata on one terminal line", async () => {
+    searchSkillsFromClawHubMock.mockResolvedValue([
+      {
+        slug: "oauth-helper",
+        ownerHandle: "demo-owner",
+        displayName: "Oauth\nHelper",
+        summary:
+          "Automate OAuth login flows.\nSupports multiple providers.\n\nFeatures:\n- Confirm before authorizing",
+      },
+    ]);
+
+    await runCommand(["skills", "search", "oauth-helper"]);
+
+    expect(runtimeLogs).toEqual([
+      "@demo-owner/oauth-helper  Oauth Helper  Automate OAuth login flows. Supports multiple providers. Features: - Confirm before authorizing",
+    ]);
+  });
+
+  it("keeps ClawHub skill search JSON output unchanged", async () => {
+    const results = [
+      {
+        score: 0.9,
+        slug: "calendar",
+        ownerHandle: "demo-owner",
+        displayName: "Calendar",
+        summary: "CalDAV helpers",
+        version: "1.2.3",
+        updatedAt: 1_700_000_000_000,
+      },
+    ];
+    searchSkillsFromClawHubMock.mockResolvedValue(results);
+
+    await runCommand(["skills", "search", "calendar", "--json"]);
+
+    expect(runtimeLogs).toEqual([]);
+    expect(runtimeStdout).toEqual([JSON.stringify({ results }, null, 2)]);
+  });
+
+  it("rejects partial numeric search limits", async () => {
+    await expect(runCommand(["skills", "search", "calendar", "--limit", "10ms"])).rejects.toThrow(
+      "--limit must be a positive integer.",
+    );
+    expect(searchSkillsFromClawHubMock).not.toHaveBeenCalled();
   });
 
   it("installs a skill from ClawHub into the active workspace", async () => {
-    installSkillFromClawHubMock.mockResolvedValue({
-      ok: true,
-      slug: "calendar",
-      version: "1.2.3",
-      targetDir: "/tmp/workspace/skills/calendar",
-    });
+    primeCalendarInstall();
 
     await runCommand(["skills", "install", "calendar", "--version", "1.2.3"]);
 
@@ -297,15 +524,179 @@ describe("skills cli commands", () => {
     ).toBe(true);
   });
 
+  it("passes owner-qualified ClawHub skill refs through to the installer", async () => {
+    primeCalendarInstall();
+
+    await runCommand(["skills", "install", "@demo-owner/calendar"]);
+
+    const installArgs = mockFirstObjectArg(installSkillFromClawHubMock);
+    expectObjectFields(installArgs, {
+      workspaceDir: "/tmp/workspace",
+      slug: "@demo-owner/calendar",
+      force: false,
+    });
+    expect(installSkillFromSourceMock).not.toHaveBeenCalled();
+    expect(
+      runtimeLogs.some((line) =>
+        line.includes("Installed calendar@1.2.3 -> /tmp/workspace/skills/calendar"),
+      ),
+    ).toBe(true);
+  });
+
+  it("routes skills-sh refs through ClawHub without translating them", async () => {
+    const reference = "skills-sh:openclaw/skills/weather";
+    installSkillFromClawHubMock.mockResolvedValue({
+      ok: true,
+      slug: "weather",
+      version: "a".repeat(40),
+      targetDir: "/tmp/workspace/skills/weather",
+    });
+
+    await runCommand(["skills", "install", reference]);
+
+    expect(mockFirstObjectArg(installSkillFromClawHubMock).slug).toBe(reference);
+    expect(installSkillFromSourceMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects --version for skills-sh refs", async () => {
+    await expect(
+      runCommand(["skills", "install", "skills-sh:openclaw/skills/weather", "--version", "1.2.3"]),
+    ).rejects.toThrow("__exit__:1");
+
+    expect(runtimeErrors).toContain("--version is not supported for skills-sh references.");
+    expect(installSkillFromClawHubMock).not.toHaveBeenCalled();
+    expect(installSkillFromSourceMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects the legacy skills-sh slash syntax before network access", async () => {
+    await expect(
+      runCommand(["skills", "install", "skills-sh/openclaw/skills/weather"]),
+    ).rejects.toThrow("__exit__:1");
+
+    expect(runtimeErrors).toContain(
+      "Invalid skills.sh skill reference: skills-sh/openclaw/skills/weather",
+    );
+    expect(installSkillFromClawHubMock).not.toHaveBeenCalled();
+    expect(installSkillFromSourceMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["install", "verify"])(
+    "documents owner-qualified ClawHub %s refs in command help",
+    (commandName) => {
+      const skillsCommand = createProgram().commands.find((command) => command.name() === "skills");
+      const command = skillsCommand?.commands.find((entry) => entry.name() === commandName);
+      const output: string[] = [];
+
+      command?.configureOutput({
+        writeOut: (value) => output.push(value),
+        writeErr: (value) => output.push(value),
+      });
+      command?.outputHelp();
+      const help = output.join("");
+
+      expect(help).toContain("<skill-ref>");
+      expect(help).toContain("@owner/slug");
+      expect(help).toContain(`openclaw skills ${commandName} @owner/weather`);
+      expect(help).not.toContain(`openclaw skills ${commandName} weather`);
+    },
+  );
+
+  it("installs a skill from a git source into the active workspace", async () => {
+    installSkillFromSourceMock.mockResolvedValue({
+      ok: true,
+      slug: "tools",
+      targetDir: "/tmp/workspace/skills/tools",
+      source: "git",
+    });
+
+    await runCommand(["skills", "install", "git:owner/tools"]);
+
+    const installArgs = mockFirstObjectArg(installSkillFromSourceMock);
+    expectObjectFields(installArgs, {
+      workspaceDir: "/tmp/workspace",
+      spec: "git:owner/tools",
+      force: false,
+    });
+    expect(installArgs.slug).toBeUndefined();
+    expectLogger(installArgs.logger);
+    expect(installSkillFromClawHubMock).not.toHaveBeenCalled();
+    expect(
+      runtimeLogs.some((line) =>
+        line.includes("Installed tools from git -> /tmp/workspace/skills/tools"),
+      ),
+    ).toBe(true);
+  });
+
+  it("accepts git refs for skill source installs", async () => {
+    installSkillFromSourceMock.mockResolvedValue({
+      ok: true,
+      slug: "tools",
+      targetDir: "/tmp/workspace/skills/tools",
+      source: "git",
+    });
+
+    await runCommand(["skills", "install", "git:owner/tools@main"]);
+
+    expect(mockFirstObjectArg(installSkillFromSourceMock).spec).toBe("git:owner/tools@main");
+    expect(installSkillFromClawHubMock).not.toHaveBeenCalled();
+  });
+
+  it("installs a skill from a local directory", async () => {
+    installSkillFromSourceMock.mockResolvedValue({
+      ok: true,
+      slug: "local-skill",
+      targetDir: "/tmp/workspace/skills/local-skill",
+      source: "path",
+    });
+
+    await runCommand(["skills", "install", "./local-skill"]);
+
+    const installArgs = mockFirstObjectArg(installSkillFromSourceMock);
+    expectObjectFields(installArgs, {
+      workspaceDir: "/tmp/workspace",
+      spec: "./local-skill",
+      force: false,
+    });
+    expect(installArgs.slug).toBeUndefined();
+    expectLogger(installArgs.logger);
+    expect(installSkillFromClawHubMock).not.toHaveBeenCalled();
+    expect(
+      runtimeLogs.some((line) =>
+        line.includes("Installed local-skill from path -> /tmp/workspace/skills/local-skill"),
+      ),
+    ).toBe(true);
+  });
+
+  it("passes --as as the source install slug override", async () => {
+    installSkillFromSourceMock.mockResolvedValue({
+      ok: true,
+      slug: "custom-name",
+      targetDir: "/tmp/workspace/skills/custom-name",
+      source: "path",
+    });
+
+    await runCommand(["skills", "install", "./local-skill", "--as", "custom-name"]);
+
+    expectObjectFields(mockFirstObjectArg(installSkillFromSourceMock), {
+      spec: "./local-skill",
+      slug: "custom-name",
+    });
+  });
+
+  it("rejects --version for git and local source installs", async () => {
+    await expect(
+      runCommand(["skills", "install", "git:owner/tools", "--version", "1.2.3"]),
+    ).rejects.toThrow("__exit__:1");
+
+    expect(runtimeErrors).toContain("--version is only supported for ClawHub skill installs.");
+    expect(installSkillFromClawHubMock).not.toHaveBeenCalled();
+    expect(installSkillFromSourceMock).not.toHaveBeenCalled();
+  });
+
   it("installs a skill into the cwd-inferred agent workspace", async () => {
     routeWorkspaceByAgent();
     resolveAgentIdByWorkspacePathMock.mockReturnValue("writer");
-    installSkillFromClawHubMock.mockResolvedValue({
-      ok: true,
-      slug: "calendar",
-      version: "1.2.3",
-      targetDir: "/tmp/workspace-writer/skills/calendar",
-    });
+    primeCalendarInstall("/tmp/workspace-writer");
 
     await withCwd("/tmp/workspace-writer/project", async () => {
       await runCommand(["skills", "install", "calendar"]);
@@ -323,12 +714,7 @@ describe("skills cli commands", () => {
   it("lets --agent override cwd-inferred workspace for installs", async () => {
     routeWorkspaceByAgent();
     resolveAgentIdByWorkspacePathMock.mockReturnValue("writer");
-    installSkillFromClawHubMock.mockResolvedValue({
-      ok: true,
-      slug: "calendar",
-      version: "1.2.3",
-      targetDir: "/tmp/workspace-main/skills/calendar",
-    });
+    primeCalendarInstall("/tmp/workspace-main");
 
     await withCwd("/tmp/workspace-writer", async () => {
       await runCommand(["skills", "install", "calendar", "--agent", "main"]);
@@ -343,12 +729,7 @@ describe("skills cli commands", () => {
 
   it("honors parent --agent for subcommands", async () => {
     routeWorkspaceByAgent();
-    installSkillFromClawHubMock.mockResolvedValue({
-      ok: true,
-      slug: "calendar",
-      version: "1.2.3",
-      targetDir: "/tmp/workspace-writer/skills/calendar",
-    });
+    primeCalendarInstall("/tmp/workspace-writer");
 
     await runCommand(["skills", "--agent", "writer", "install", "calendar"]);
 
@@ -359,12 +740,7 @@ describe("skills cli commands", () => {
   });
 
   it("installs a skill into the shared global skills directory", async () => {
-    installSkillFromClawHubMock.mockResolvedValue({
-      ok: true,
-      slug: "calendar",
-      version: "1.2.3",
-      targetDir: "/tmp/openclaw-config/skills/calendar",
-    });
+    primeCalendarInstall("/tmp/openclaw-config");
 
     await runCommand(["skills", "install", "calendar", "--global"]);
 
@@ -378,36 +754,71 @@ describe("skills cli commands", () => {
     );
   });
 
-  it("rejects using --global and --agent together for installs", async () => {
-    await expect(
-      runCommand(["skills", "install", "calendar", "--global", "--agent", "main"]),
-    ).rejects.toThrow("__exit__:1");
+  it.each([
+    { flag: "--force-install", option: "forceInstall" },
+    { flag: "--acknowledge-clawhub-risk", option: "acknowledgeClawHubRisk" },
+  ])("passes $flag through for ClawHub skill installs", async ({ flag, option }) => {
+    primeCalendarInstall();
 
-    expect(runtimeErrors).toContain("Use either --global or --agent, not both.");
-    expect(installSkillFromClawHubMock).not.toHaveBeenCalled();
+    await runCommand(["skills", "install", "calendar", flag]);
+
+    expect(installSkillFromClawHubMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceDir: "/tmp/workspace",
+        slug: "calendar",
+        [option]: true,
+      }),
+    );
   });
 
-  it("rejects using parent --agent with install --global", async () => {
-    await expect(
-      runCommand(["skills", "--agent", "writer", "install", "calendar", "--global"]),
-    ).rejects.toThrow("__exit__:1");
+  it("prints acknowledgement guidance for unacknowledged ClawHub skill installs", async () => {
+    installSkillFromClawHubMock.mockResolvedValue({
+      ok: false,
+      code: "clawhub_risk_acknowledgement_required",
+      error:
+        "Install cancelled; rerun with --acknowledge-clawhub-risk to continue after reviewing the warning.",
+      warning: "WARNING - ClawHub found security risks in this release",
+    });
 
+    await expect(runCommand(["skills", "install", "calendar"])).rejects.toThrow("__exit__:1");
+
+    expect(runtimeErrors).toContain(
+      "Install cancelled; rerun with --acknowledge-clawhub-risk to continue after reviewing the warning.",
+    );
+  });
+
+  it("prints blocked ClawHub skill install failures when no trust warning was emitted", async () => {
+    installSkillFromClawHubMock.mockResolvedValue({
+      ok: false,
+      code: "clawhub_download_blocked",
+      error:
+        'ClawHub blocked artifact download for "calendar@1.2.3"; install was not started. ClawHub /api/v1/skills/calendar/versions/1.2.3/download failed (403): blocked.',
+    });
+
+    await expect(runCommand(["skills", "install", "calendar"])).rejects.toThrow("__exit__:1");
+
+    expect(runtimeErrors).toContain(
+      'ClawHub blocked artifact download for "calendar@1.2.3"; install was not started. ClawHub /api/v1/skills/calendar/versions/1.2.3/download failed (403): blocked.',
+    );
+  });
+
+  it.each([
+    {
+      name: "rejects using --global and --agent together for installs",
+      args: ["skills", "install", "calendar", "--global", "--agent", "main"],
+    },
+    {
+      name: "rejects using parent --agent with install --global",
+      args: ["skills", "--agent", "writer", "install", "calendar", "--global"],
+    },
+  ])("$name", async ({ args }) => {
+    await expect(runCommand(args)).rejects.toThrow("__exit__:1");
     expect(runtimeErrors).toContain("Use either --global or --agent, not both.");
     expect(installSkillFromClawHubMock).not.toHaveBeenCalled();
   });
 
   it("updates all tracked ClawHub skills", async () => {
-    readTrackedClawHubSkillSlugsMock.mockResolvedValue(["calendar"]);
-    updateSkillsFromClawHubMock.mockResolvedValue([
-      {
-        ok: true,
-        slug: "calendar",
-        previousVersion: "1.2.2",
-        version: "1.2.3",
-        changed: true,
-        targetDir: "/tmp/workspace/skills/calendar",
-      },
-    ]);
+    primeCalendarUpdate();
 
     await runCommand(["skills", "update", "--all"]);
 
@@ -417,6 +828,7 @@ describe("skills cli commands", () => {
       workspaceDir: "/tmp/workspace",
       slug: undefined,
     });
+    expect(updateAllArgs.config).toEqual({});
     expectLogger(updateAllArgs.logger);
     expect(
       runtimeLogs.some((line) => line.includes("Updated calendar: 1.2.2 -> 1.2.3")),
@@ -425,20 +837,64 @@ describe("skills cli commands", () => {
     expect(runtimeErrors).toStrictEqual([]);
   });
 
-  it("updates tracked ClawHub skills in the cwd-inferred agent workspace", async () => {
-    routeWorkspaceByAgent();
-    resolveAgentIdByWorkspacePathMock.mockReturnValue("writer");
+  it("does not bootstrap configured skills during update all", async () => {
+    loadConfigMock.mockReturnValueOnce({
+      agents: {
+        defaults: {
+          skills: ["apple-notes"],
+        },
+      },
+    });
+    readTrackedClawHubSkillSlugsMock.mockResolvedValue([]);
+
+    await runCommand(["skills", "update", "--all"]);
+
+    expect(readTrackedClawHubSkillSlugsMock).toHaveBeenCalledWith("/tmp/workspace");
+    expect(updateSkillsFromClawHubMock).not.toHaveBeenCalled();
+    expect(runtimeLogs).toContain("No tracked ClawHub skills to update.");
+    expect(runtimeErrors).toStrictEqual([]);
+  });
+
+  it.each([
+    { flag: "--force-install", option: "forceInstall" },
+    { flag: "--acknowledge-clawhub-risk", option: "acknowledgeClawHubRisk" },
+  ])("passes $flag through for ClawHub skill updates", async ({ flag, option }) => {
+    primeCalendarUpdate();
+
+    await runCommand(["skills", "update", "--all", flag]);
+
+    expect(updateSkillsFromClawHubMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceDir: "/tmp/workspace",
+        ...(option === "forceInstall" ? { slug: undefined } : {}),
+        [option]: true,
+      }),
+    );
+  });
+
+  it("prints acknowledgement guidance for unacknowledged ClawHub skill updates", async () => {
     readTrackedClawHubSkillSlugsMock.mockResolvedValue(["calendar"]);
     updateSkillsFromClawHubMock.mockResolvedValue([
       {
-        ok: true,
-        slug: "calendar",
-        previousVersion: "1.2.2",
-        version: "1.2.3",
-        changed: true,
-        targetDir: "/tmp/workspace-writer/skills/calendar",
+        ok: false,
+        code: "clawhub_risk_acknowledgement_required",
+        error:
+          "Update cancelled; rerun with --acknowledge-clawhub-risk to continue after reviewing the warning.",
+        warning: "WARNING - ClawHub found security risks in this release",
       },
     ]);
+
+    await expect(runCommand(["skills", "update", "calendar"])).rejects.toThrow("__exit__:1");
+
+    expect(runtimeErrors).toContain(
+      "Update cancelled; rerun with --acknowledge-clawhub-risk to continue after reviewing the warning.",
+    );
+  });
+
+  it("updates tracked ClawHub skills in the cwd-inferred agent workspace", async () => {
+    routeWorkspaceByAgent();
+    resolveAgentIdByWorkspacePathMock.mockReturnValue("writer");
+    primeCalendarUpdate("/tmp/workspace-writer");
 
     await withCwd("/tmp/workspace-writer", async () => {
       await runCommand(["skills", "update", "--all"]);
@@ -456,17 +912,7 @@ describe("skills cli commands", () => {
   it("lets --agent override cwd-inferred workspace for updates", async () => {
     routeWorkspaceByAgent();
     resolveAgentIdByWorkspacePathMock.mockReturnValue("writer");
-    readTrackedClawHubSkillSlugsMock.mockResolvedValue(["calendar"]);
-    updateSkillsFromClawHubMock.mockResolvedValue([
-      {
-        ok: true,
-        slug: "calendar",
-        previousVersion: "1.2.2",
-        version: "1.2.3",
-        changed: true,
-        targetDir: "/tmp/workspace-main/skills/calendar",
-      },
-    ]);
+    primeCalendarUpdate("/tmp/workspace-main");
 
     await withCwd("/tmp/workspace-writer", async () => {
       await runCommand(["skills", "update", "calendar", "--agent", "main"]);
@@ -481,46 +927,21 @@ describe("skills cli commands", () => {
     expectLogger(updateOverrideArgs.logger);
   });
 
-  it("updates tracked ClawHub skills in the shared global skills directory", async () => {
-    readTrackedClawHubSkillSlugsMock.mockResolvedValue(["calendar"]);
-    updateSkillsFromClawHubMock.mockResolvedValue([
-      {
-        ok: true,
-        slug: "calendar",
-        previousVersion: "1.2.2",
-        version: "1.2.3",
-        changed: true,
-        targetDir: "/tmp/openclaw-config/skills/calendar",
-      },
-    ]);
-
-    await runCommand(["skills", "update", "--all", "--global"]);
-
-    expect(resolveAgentIdByWorkspacePathMock).not.toHaveBeenCalled();
-    expect(resolveDefaultAgentIdMock).not.toHaveBeenCalled();
-    expect(resolveAgentWorkspaceDirMock).not.toHaveBeenCalled();
-    expect(readTrackedClawHubSkillSlugsMock).toHaveBeenCalledWith("/tmp/openclaw-config");
-    expect(updateSkillsFromClawHubMock).toHaveBeenCalledWith({
-      workspaceDir: "/tmp/openclaw-config",
+  it.each([
+    {
+      name: "updates tracked ClawHub skills in the shared global skills directory",
+      selection: "--all",
       slug: undefined,
-      logger: expect.any(Object),
-    });
-  });
+    },
+    {
+      name: "updates a single tracked ClawHub skill in the shared global skills directory",
+      selection: "calendar",
+      slug: "calendar",
+    },
+  ])("$name", async ({ selection, slug }) => {
+    primeCalendarUpdate("/tmp/openclaw-config");
 
-  it("updates a single tracked ClawHub skill in the shared global skills directory", async () => {
-    readTrackedClawHubSkillSlugsMock.mockResolvedValue(["calendar"]);
-    updateSkillsFromClawHubMock.mockResolvedValue([
-      {
-        ok: true,
-        slug: "calendar",
-        previousVersion: "1.2.2",
-        version: "1.2.3",
-        changed: true,
-        targetDir: "/tmp/openclaw-config/skills/calendar",
-      },
-    ]);
-
-    await runCommand(["skills", "update", "calendar", "--global"]);
+    await runCommand(["skills", "update", selection, "--global"]);
 
     expect(resolveAgentIdByWorkspacePathMock).not.toHaveBeenCalled();
     expect(resolveDefaultAgentIdMock).not.toHaveBeenCalled();
@@ -528,32 +949,328 @@ describe("skills cli commands", () => {
     expect(readTrackedClawHubSkillSlugsMock).toHaveBeenCalledWith("/tmp/openclaw-config");
     expect(updateSkillsFromClawHubMock).toHaveBeenCalledWith({
       workspaceDir: "/tmp/openclaw-config",
-      slug: "calendar",
+      slug,
       logger: expect.any(Object),
+      config: {},
     });
   });
 
-  it("rejects using --global and --agent together for updates", async () => {
-    await expect(
-      runCommand(["skills", "update", "--all", "--global", "--agent", "main"]),
-    ).rejects.toThrow("__exit__:1");
+  it("exits nonzero when a tracked ClawHub skill update fails", async () => {
+    readTrackedClawHubSkillSlugsMock.mockResolvedValue(["calendar"]);
+    updateSkillsFromClawHubMock.mockResolvedValue([
+      {
+        ok: false,
+        error: "blocked by install policy: calendar is not approved",
+      },
+    ]);
 
-    expect(runtimeErrors).toContain("Use either --global or --agent, not both.");
-    expect(readTrackedClawHubSkillSlugsMock).not.toHaveBeenCalled();
-    expect(updateSkillsFromClawHubMock).not.toHaveBeenCalled();
-  });
+    await expect(runCommand(["skills", "update", "calendar"])).rejects.toThrow("__exit__:1");
 
-  it("rejects using parent --agent with update --global", async () => {
-    await expect(
-      runCommand(["skills", "--agent", "writer", "update", "--all", "--global"]),
-    ).rejects.toThrow("__exit__:1");
-
-    expect(runtimeErrors).toContain("Use either --global or --agent, not both.");
-    expect(readTrackedClawHubSkillSlugsMock).not.toHaveBeenCalled();
-    expect(updateSkillsFromClawHubMock).not.toHaveBeenCalled();
+    expect(runtimeErrors).toContain("blocked by install policy: calendar is not approved");
+    expect(runtimeLogs).toStrictEqual([]);
   });
 
   it.each([
+    {
+      name: "rejects using --global and --agent together for updates",
+      args: ["skills", "update", "--all", "--global", "--agent", "main"],
+    },
+    {
+      name: "rejects using parent --agent with update --global",
+      args: ["skills", "--agent", "writer", "update", "--all", "--global"],
+    },
+  ])("$name", async ({ args }) => {
+    await expect(runCommand(args)).rejects.toThrow("__exit__:1");
+    expect(runtimeErrors).toContain("Use either --global or --agent, not both.");
+    expect(readTrackedClawHubSkillSlugsMock).not.toHaveBeenCalled();
+    expect(updateSkillsFromClawHubMock).not.toHaveBeenCalled();
+  });
+
+  it("verifies ClawHub skills with JSON output by default", async () => {
+    await runCommand(["skills", "verify", "agentreceipt"]);
+
+    expect(resolveClawHubSkillVerificationTargetMock).toHaveBeenCalledWith({
+      workspaceDir: "/tmp/workspace",
+      slug: "agentreceipt",
+      version: undefined,
+      tag: undefined,
+    });
+    expect(fetchClawHubSkillVerificationMock).toHaveBeenCalledWith({
+      slug: "agentreceipt",
+      version: "1.2.3",
+      tag: undefined,
+      baseUrl: "https://private.example.com/clawhub",
+    });
+    expect(defaultRuntime.writeJson).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse(runtimeStdout.at(-1) ?? "{}") as Record<string, unknown>;
+    expect(payload.schema).toBe("clawhub.skill.verify.v1");
+    expect(payload.ok).toBe(true);
+    expect(payload.signature).toEqual({ status: "unsigned" });
+    expect(payload.openclaw).toEqual({
+      resolution: {
+        source: "installed",
+        selector: "installed-version",
+        registry: "https://private.example.com/clawhub",
+        installedVersion: "1.2.3",
+      },
+    });
+    expect(defaultRuntime.exit).not.toHaveBeenCalled();
+  });
+
+  it("passes owner-qualified installed verification targets to ClawHub verification", async () => {
+    resolveClawHubSkillVerificationTargetMock.mockResolvedValueOnce({
+      ok: true,
+      slug: "weather",
+      ownerHandle: "demo-owner",
+      baseUrl: "https://private.example.com/clawhub",
+      version: "1.2.3",
+      tag: undefined,
+      resolution: {
+        source: "installed",
+        selector: "installed-version",
+        registry: "https://private.example.com/clawhub",
+        skillDir: "/tmp/workspace/skills/weather",
+        installedVersion: "1.2.3",
+      },
+    });
+
+    await runCommand(["skills", "verify", "weather"]);
+
+    expect(fetchClawHubSkillVerificationMock).toHaveBeenCalledWith({
+      slug: "weather",
+      ownerHandle: "demo-owner",
+      version: "1.2.3",
+      tag: undefined,
+      baseUrl: "https://private.example.com/clawhub",
+    });
+  });
+
+  it("passes owner-qualified verify refs and selectors through the resolver", async () => {
+    resolveClawHubSkillVerificationTargetMock.mockResolvedValueOnce({
+      ok: true,
+      slug: "weather",
+      ownerHandle: "demo-owner",
+      baseUrl: "https://private.example.com/clawhub",
+      version: undefined,
+      tag: "latest",
+      resolution: {
+        source: "registry",
+        selector: "tag",
+        registry: "https://private.example.com/clawhub",
+        skillDir: undefined,
+        installedVersion: undefined,
+      },
+    });
+
+    await runCommand(["skills", "verify", "@demo-owner/weather", "--tag", "latest", "--card"]);
+
+    expect(resolveClawHubSkillVerificationTargetMock).toHaveBeenCalledWith({
+      workspaceDir: "/tmp/workspace",
+      slug: "@demo-owner/weather",
+      version: undefined,
+      tag: "latest",
+    });
+    expect(fetchClawHubSkillVerificationMock).toHaveBeenCalledWith({
+      slug: "weather",
+      ownerHandle: "demo-owner",
+      version: undefined,
+      tag: "latest",
+      baseUrl: "https://private.example.com/clawhub",
+    });
+    expect(fetchClawHubSkillCardMock).toHaveBeenCalledWith({
+      url: "https://private.example.com/clawhub/api/v1/skills/agentreceipt/card?version=1.2.3",
+      baseUrl: "https://private.example.com/clawhub",
+    });
+  });
+
+  it("passes explicit verify selectors and shared workspace options to the resolver", async () => {
+    await runCommand(["skills", "verify", "agentreceipt", "--version", "2.0.0", "--global"]);
+
+    expect(resolveAgentIdByWorkspacePathMock).not.toHaveBeenCalled();
+    expect(resolveDefaultAgentIdMock).not.toHaveBeenCalled();
+    expect(resolveAgentWorkspaceDirMock).not.toHaveBeenCalled();
+    expect(resolveClawHubSkillVerificationTargetMock).toHaveBeenCalledWith({
+      workspaceDir: "/tmp/openclaw-config",
+      slug: "agentreceipt",
+      version: "2.0.0",
+      tag: undefined,
+    });
+  });
+
+  it("includes verified ClawHub source URLs in verify JSON output", async () => {
+    const provenance = {
+      source: "server-resolved-github-import",
+      repo: "openclaw/skills",
+      commit: "0123456789abcdef0123456789abcdef01234567",
+      path: "agentreceipt",
+    };
+    const verifiedSourceUrl =
+      "https://github.com/openclaw/skills/tree/0123456789abcdef0123456789abcdef01234567/agentreceipt";
+    readVerifiedClawHubSkillSourceUrlMock.mockReturnValueOnce(verifiedSourceUrl);
+    primeSkillVerification({
+      skill: { slug: "agentreceipt", displayName: "Agent Receipt" },
+      publisher: { handle: "openclaw" },
+      card: {
+        available: true,
+        url: "https://private.example.com/clawhub/api/v1/skills/agentreceipt/card?version=1.2.3",
+      },
+      artifact: {
+        sourceFingerprint: "source-fingerprint",
+        bundleFingerprints: ["generated-bundle-fingerprint"],
+      },
+      provenance,
+    });
+
+    await runCommand(["skills", "verify", "agentreceipt"]);
+
+    expect(readVerifiedClawHubSkillSourceUrlMock).toHaveBeenCalledWith(provenance);
+    const payload = JSON.parse(runtimeStdout.at(-1) ?? "{}") as {
+      openclaw?: { verifiedSourceUrl?: string };
+    };
+    expect(payload.openclaw?.verifiedSourceUrl).toBe(verifiedSourceUrl);
+    expect(defaultRuntime.exit).not.toHaveBeenCalled();
+  });
+
+  it("fetches generated Skill Card markdown for --card", async () => {
+    primeSkillVerification({
+      skill: { slug: "agentreceipt", displayName: "Agent Receipt" },
+      publisher: { handle: "openclaw" },
+      card: {
+        available: true,
+        url: "https://cards.example.test/generated/agentreceipt.md",
+      },
+      artifact: {
+        sourceFingerprint: "source-fingerprint",
+        bundleFingerprints: ["generated-bundle-fingerprint"],
+      },
+    });
+
+    await runCommand(["skills", "verify", "agentreceipt", "--tag", "latest", "--card"]);
+
+    expect(resolveClawHubSkillVerificationTargetMock).toHaveBeenCalledWith({
+      workspaceDir: "/tmp/workspace",
+      slug: "agentreceipt",
+      version: undefined,
+      tag: "latest",
+    });
+    expect(fetchClawHubSkillCardMock).toHaveBeenCalledWith({
+      url: "https://cards.example.test/generated/agentreceipt.md",
+      baseUrl: "https://private.example.com/clawhub",
+    });
+    expect(defaultRuntime.writeStdout).toHaveBeenCalledTimes(1);
+    expect(runtimeStdout.at(-1)).toBe("# Agent Receipt\n\nGenerated by ClawHub.");
+    expect(defaultRuntime.writeJson).not.toHaveBeenCalled();
+  });
+
+  it("fails --card when the verified Skill Card is unavailable", async () => {
+    primeSkillVerification({
+      ok: false,
+      decision: "fail",
+      reasons: ["card.missing"],
+      card: { available: false },
+    });
+
+    await expect(runCommand(["skills", "verify", "agentreceipt", "--card"])).rejects.toThrow(
+      "__exit__:1",
+    );
+
+    expect(runtimeErrors).toContain("Skill Card is not available.");
+    expect(fetchClawHubSkillCardMock).not.toHaveBeenCalled();
+    expect(defaultRuntime.writeJson).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: "missing card", card: null },
+    { label: "missing card URL", card: { available: true } },
+  ])("fails --card when the verification response has $label metadata", async ({ card }) => {
+    primeSkillVerification({ card });
+
+    await expect(runCommand(["skills", "verify", "agentreceipt", "--card"])).rejects.toThrow(
+      "__exit__:1",
+    );
+
+    expect(runtimeErrors).toContain(
+      "ClawHub verification response did not include a Skill Card URL.",
+    );
+    expect(fetchClawHubSkillCardMock).not.toHaveBeenCalled();
+    expect(defaultRuntime.writeJson).not.toHaveBeenCalled();
+  });
+
+  it("exits non-zero when the ClawHub verification envelope fails", async () => {
+    primeSkillVerification({
+      ok: false,
+      decision: "fail",
+      reasons: ["security.status_not_clean"],
+      security: { status: "malicious" },
+    });
+
+    await expect(runCommand(["skills", "verify", "agentreceipt"])).rejects.toThrow("__exit__:1");
+
+    const payload = JSON.parse(runtimeStdout.at(-1) ?? "{}") as Record<string, unknown>;
+    expect(payload.ok).toBe(false);
+    expect(runtimeErrors).toStrictEqual([]);
+  });
+
+  it.each([
+    { label: "unknown decision", ok: true, decision: "quarantined" },
+    { label: "non-boolean ok", ok: "false", decision: "pass" },
+  ])("fails closed for malformed verification envelopes with $label", async ({ ok, decision }) => {
+    primeSkillVerification({
+      ok,
+      decision,
+      card: {
+        available: true,
+        url: "https://private.example.com/clawhub/api/v1/skills/agentreceipt/card?version=1.2.3",
+      },
+    });
+
+    await expect(runCommand(["skills", "verify", "agentreceipt"])).rejects.toThrow("__exit__:1");
+
+    const payload = JSON.parse(runtimeStdout.at(-1) ?? "{}") as Record<string, unknown>;
+    expect(payload.ok).toBe(ok);
+    expect(payload.decision).toBe(decision);
+    expect(runtimeErrors).toStrictEqual([]);
+  });
+
+  it("fails before fetching when verification target resolution fails", async () => {
+    resolveClawHubSkillVerificationTargetMock.mockResolvedValueOnce({
+      ok: false,
+      error: "Use either --version or --tag.",
+    });
+
+    await expect(
+      runCommand(["skills", "verify", "agentreceipt", "--version", "1.0.0", "--tag", "latest"]),
+    ).rejects.toThrow("__exit__:1");
+
+    expect(runtimeErrors).toContain("Use either --version or --tag.");
+    expect(fetchClawHubSkillVerificationMock).not.toHaveBeenCalled();
+    expect(fetchClawHubSkillCardMock).not.toHaveBeenCalled();
+  });
+
+  it("registers explicit --json output for verify", () => {
+    const skills = createProgram().commands.find((command) => command.name() === "skills");
+    const verify = skills?.commands.find((command) => command.name() === "verify");
+
+    expect(verify?.options.map((option) => option.long)).toEqual([
+      "--version",
+      "--tag",
+      "--card",
+      "--json",
+      "--global",
+      "--agent",
+    ]);
+  });
+
+  it.each([
+    {
+      label: "default list",
+      argv: ["skills", "--json"],
+      assert: (payload: Record<string, unknown>) => {
+        const skills = payload.skills as Array<Record<string, unknown>>;
+        expect(skills).toHaveLength(1);
+        expect(skills[0]?.name).toBe("calendar");
+      },
+    },
     {
       label: "list",
       argv: ["skills", "list", "--json"],
@@ -588,6 +1305,7 @@ describe("skills cli commands", () => {
     expect(defaultRuntime.writeStdout).toHaveBeenCalledTimes(1);
     expect(defaultRuntime.writeJson).not.toHaveBeenCalled();
     expect(defaultRuntime.log).not.toHaveBeenCalled();
+    expect(defaultRuntime.exit).not.toHaveBeenCalled();
     expect(runtimeErrors).toStrictEqual([]);
     expect(runtimeStdout).toHaveLength(1);
 
@@ -609,6 +1327,60 @@ describe("skills cli commands", () => {
     });
 
     expectStatusWorkspaceCall("/tmp/workspace-writer");
+  });
+
+  it("uses gateway skills.status for read-only status commands when reachable", async () => {
+    routeWorkspaceByAgent();
+    const gatewayReport = {
+      ...skillStatusReportFixture,
+      agentId: "writer",
+      workspaceDir: "/gateway/workspace-writer",
+      skills: [
+        {
+          ...skillStatusReportFixture.skills[0],
+          name: "apple-notes",
+          description: "Notes helpers",
+          eligible: true,
+          modelVisible: true,
+          commandVisible: true,
+          requirements: {
+            bins: ["memo"],
+            anyBins: [],
+            env: [],
+            config: [],
+            os: ["darwin"],
+          },
+          missing: {
+            bins: [],
+            anyBins: [],
+            env: [],
+            config: [],
+            os: [],
+          },
+        },
+      ],
+    };
+    callGatewayMock.mockResolvedValue(gatewayReport);
+
+    await runCommand(["skills", "check", "--agent", "writer", "--json"]);
+
+    expect(callGatewayMock).toHaveBeenCalledWith({
+      config: {},
+      method: "skills.status",
+      params: { agentId: "writer" },
+      timeoutMs: 1_500,
+      clientName: "cli",
+      mode: "cli",
+    });
+    expect(buildWorkspaceSkillStatusMock).not.toHaveBeenCalled();
+    const output = JSON.parse(runtimeStdout.at(-1) ?? "{}") as {
+      workspaceDir?: string;
+      eligible?: string[];
+      missingRequirements?: Array<{ name: string }>;
+    };
+    expect(output.workspaceDir).toBe("/gateway/workspace-writer");
+    expect(output.eligible).toEqual(["apple-notes"]);
+    expect(output.missingRequirements).toEqual([]);
   });
 
   it.each([
@@ -645,6 +1417,7 @@ describe("skills cli commands", () => {
   it("keeps non-JSON skills list output on stdout with human-readable formatting", async () => {
     await runCommand(["skills", "list"]);
 
+    expect(loadConfigMock).toHaveBeenCalledWith({ skipPluginValidation: true });
     expect(defaultRuntime.writeStdout).toHaveBeenCalledTimes(1);
     expect(defaultRuntime.log).not.toHaveBeenCalled();
     expect(runtimeErrors).toStrictEqual([]);
@@ -652,3 +1425,4 @@ describe("skills cli commands", () => {
     expect(runtimeStdout.at(-1)).toContain("openclaw skills search");
   });
 });
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

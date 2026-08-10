@@ -1,3 +1,4 @@
+// Agent command-list tests cover provider metadata and command output for configured agents.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { OutputRuntimeEnv } from "../runtime.js";
@@ -27,8 +28,8 @@ const {
   summarizeBindingsMock: vi.fn(),
 }));
 
-vi.mock("./agents.command-shared.js", () => ({
-  requireValidConfig: requireValidConfigMock,
+vi.mock("./config-validation.js", () => ({
+  requireValidConfigSnapshot: requireValidConfigMock,
 }));
 
 vi.mock("./agents.providers.js", () => ({

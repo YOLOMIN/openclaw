@@ -1,12 +1,15 @@
+/** Production-private runtime seam for bundled and separately published official plugins. */
 export type { RealtimeVoiceProviderPlugin } from "../plugins/types.js";
 export type {
   RealtimeVoiceAudioFormat,
+  RealtimeVoiceAgentConsultRunner,
   RealtimeVoiceBargeInOptions,
   RealtimeVoiceBridge,
   RealtimeVoiceBridgeCallbacks,
   RealtimeVoiceBridgeEvent,
   RealtimeVoiceBrowserSession,
   RealtimeVoiceBrowserSessionCreateRequest,
+  RealtimeVoiceGatewayControl,
   RealtimeVoiceBridgeCreateRequest,
   RealtimeVoiceProviderCapabilities,
   RealtimeVoiceCloseReason,
@@ -51,6 +54,53 @@ export {
   type TalkTurnSuccess,
 } from "../talk/talk-session-controller.js";
 export {
+  REALTIME_VOICE_ACTIVATION_NAME_MAX_WORDS,
+  isSupportedRealtimeVoiceActivationName,
+  matchRealtimeVoiceActivationName,
+  normalizeRealtimeVoiceActivationName,
+  normalizeRealtimeVoiceActivationNamePrefix,
+  normalizeSupportedRealtimeVoiceActivationName,
+  realtimeVoiceActivationNameWordCount,
+  sortRealtimeVoiceActivationNames,
+  type RealtimeVoiceActivationNameEdge,
+  type RealtimeVoiceActivationNameMatchKind,
+  type RealtimeVoiceActivationNameTranscriptResult,
+} from "../talk/activation-name.js";
+export {
+  classifySkippableRealtimeVoiceConsultTranscript,
+  type SkippableRealtimeVoiceConsultTranscriptReason,
+} from "../talk/consult-transcript.js";
+export {
+  matchRealtimeVoiceConsultQuestions,
+  normalizeRealtimeVoiceConsultQuestion,
+  readRealtimeVoiceConsultQuestion,
+  readSpeakableRealtimeVoiceToolResult,
+  type RealtimeVoiceConsultQuestionMatchOptions,
+  type RealtimeVoiceSpeakableToolResultOptions,
+} from "../talk/consult-question.js";
+export {
+  createRealtimeVoiceForcedConsultCoordinator,
+  type RealtimeVoiceForcedConsultCoordinator,
+  type RealtimeVoiceForcedConsultCoordinatorOptions,
+  type RealtimeVoiceForcedConsultHandle,
+  type RealtimeVoiceForcedConsultNativeMatch,
+  type RealtimeVoiceForcedConsultNativeRecentOptions,
+  type RealtimeVoiceForcedConsultTimer,
+} from "../talk/forced-consult-coordinator.js";
+export {
+  createRealtimeVoiceTurnContextTracker,
+  type RealtimeVoiceTurnContextHandle,
+  type RealtimeVoiceTurnContextTracker,
+  type RealtimeVoiceTurnContextTrackerOptions,
+} from "../talk/turn-context-tracker.js";
+export {
+  createRealtimeVoiceOutputActivityTracker,
+  type RealtimeVoiceOutputActivityDelta,
+  type RealtimeVoiceOutputActivitySnapshot,
+  type RealtimeVoiceOutputActivityTracker,
+  type RealtimeVoiceOutputActivityTrackerOptions,
+} from "../talk/output-activity-tracker.js";
+export {
   buildRealtimeVoiceAgentConsultChatMessage,
   buildRealtimeVoiceAgentConsultPolicyInstructions,
   buildRealtimeVoiceAgentConsultPrompt,
@@ -69,7 +119,9 @@ export {
   type RealtimeVoiceAgentConsultTranscriptEntry,
 } from "../talk/agent-consult-tool.js";
 export {
+  assertRealtimeVoiceAgentConsultModelSelectionUnlocked,
   consultRealtimeVoiceAgent,
+  REALTIME_VOICE_AGENT_CONSULT_SENDER_AUTH_VERSION,
   type RealtimeVoiceAgentConsultResult,
   type RealtimeVoiceAgentConsultRuntime,
 } from "../talk/agent-consult-runtime.js";
@@ -79,6 +131,23 @@ export {
   type RealtimeVoiceAgentTalkbackQueueParams,
   type RealtimeVoiceAgentTalkbackResult,
 } from "../talk/agent-talkback-runtime.js";
+export {
+  buildRealtimeVoiceAgentCancelProviderResult,
+  buildRealtimeVoiceAgentControlSpeechMessage,
+  classifyRealtimeVoiceAgentControlText,
+  controlRealtimeVoiceAgentRun,
+  normalizeRealtimeVoiceAgentControlMode,
+  parseRealtimeVoiceAgentControlToolArgs,
+  REALTIME_VOICE_AGENT_CONTROL_MODES,
+  REALTIME_VOICE_AGENT_CONTROL_TOOL,
+  REALTIME_VOICE_AGENT_CONTROL_TOOL_NAME,
+  resolveRealtimeVoiceAgentControlIntent,
+  shouldAutoControlRealtimeVoiceAgentText,
+  type RealtimeVoiceAgentControlMode,
+  type RealtimeVoiceAgentControlIntent,
+  type RealtimeVoiceAgentControlProviderResult,
+  type RealtimeVoiceAgentControlResult,
+} from "../talk/agent-run-control.js";
 export {
   resolveRealtimeVoiceFastContextConsult,
   type RealtimeVoiceFastContextConfig,
@@ -104,6 +173,16 @@ export {
   type RealtimeVoiceMarkStrategy,
 } from "../talk/session-runtime.js";
 export {
+  createRealtimeVoiceSessionHarness,
+  type RealtimeVoiceSessionHarness,
+} from "../talk/realtime-session-harness.js";
+export {
+  createRealtimeVoiceAudioQueue,
+  RealtimeVoiceSessionLifecycle,
+  type RealtimeVoiceAudioQueue,
+  type RealtimeVoiceSessionConnection,
+} from "../talk/realtime-session-lifecycle.js";
+export {
   extendRealtimeVoiceOutputEchoSuppression,
   getRealtimeVoiceBridgeEventHealth,
   getRealtimeVoiceTranscriptHealth,
@@ -115,6 +194,12 @@ export {
   type RealtimeVoiceTranscriptEntry,
   type RealtimeVoiceTranscriptHealth,
 } from "../talk/session-log-runtime.js";
+export {
+  calculateMulawRms,
+  createSpeechThresholdGate,
+  readPcm16AudioStats,
+  type AudioEnergyStats,
+} from "../talk/audio-energy.js";
 export {
   convertPcmToMulaw8k,
   mulawToPcm,

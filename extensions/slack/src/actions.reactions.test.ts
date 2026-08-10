@@ -1,6 +1,14 @@
+// Slack tests cover actions.reactions plugin behavior.
 import type { WebClient } from "@slack/web-api";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { reactSlackMessage, removeOwnSlackReactions, removeSlackReaction } from "./actions.js";
+
+const getSlackWriteClientMock = vi.hoisted(() => vi.fn());
+
+vi.mock("./client.js", async () => {
+  const actual = await vi.importActual<typeof import("./client.js")>("./client.js");
+  return { ...actual, getSlackWriteClient: getSlackWriteClientMock };
+});
 
 function createClient() {
   return {
@@ -38,6 +46,27 @@ function slackPlatformError(error: string) {
 }
 
 describe("reactSlackMessage", () => {
+  beforeEach(() => {
+    getSlackWriteClientMock.mockReset();
+  });
+
+  it("uses a workspace-scoped write client for Enterprise Grid reactions", async () => {
+    const client = createClient();
+    getSlackWriteClientMock.mockReturnValue(client);
+
+    await reactSlackMessage("C1", "123.456", "✅", {
+      teamId: "T1",
+      token: "xoxb-test",
+    });
+
+    expect(getSlackWriteClientMock).toHaveBeenCalledWith("xoxb-test", { teamId: "T1" });
+    expect(client.reactions.add).toHaveBeenCalledWith({
+      channel: "C1",
+      timestamp: "123.456",
+      name: "white_check_mark",
+    });
+  });
+
   it("treats already_reacted as idempotent success", async () => {
     const client = createClient();
     client.reactions.add.mockRejectedValueOnce(slackPlatformError("already_reacted"));
@@ -74,6 +103,27 @@ describe("reactSlackMessage", () => {
     expect((error as { data?: unknown }).data).toEqual({
       ok: false,
       error: "invalid_name",
+    });
+  });
+});
+
+describe("reactSlackMessage emoji normalization", () => {
+  it.each([
+    { input: "✅", expected: "white_check_mark" },
+    { input: ":fire:", expected: "fire" },
+    { input: "rocket", expected: "rocket" },
+    { input: "🦄", expected: "🦄" },
+    { input: "👍🏽", expected: "thumbsup::skin-tone-4" },
+    { input: "⚠️", expected: "warning" },
+  ])("normalizes $input to $expected", async ({ input, expected }) => {
+    const client = createClient();
+
+    await reactSlackMessage("C1", "123.456", input, { client, token: "xoxb-test" });
+
+    expect(client.reactions.add).toHaveBeenCalledWith({
+      channel: "C1",
+      timestamp: "123.456",
+      name: expected,
     });
   });
 });

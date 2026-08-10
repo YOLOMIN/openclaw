@@ -1,5 +1,9 @@
+/**
+ * Contract suite for bundled plugin registration ownership and manifest auth metadata.
+ */
 import { describe, expect, it } from "vitest";
-import { loadPluginManifestRegistry, pluginRegistrationContractRegistry } from "../testing.js";
+import { pluginRegistrationContractRegistry } from "../../plugins/contracts/registry.js";
+import { loadPluginManifestRegistry } from "../../plugins/manifest-registry.js";
 
 type PluginRegistrationContractParams = {
   pluginId: string;
@@ -11,14 +15,11 @@ type PluginRegistrationContractParams = {
   realtimeTranscriptionProviderIds?: string[];
   realtimeVoiceProviderIds?: string[];
   mediaUnderstandingProviderIds?: string[];
+  transcriptSourceProviderIds?: string[];
   imageGenerationProviderIds?: string[];
   videoGenerationProviderIds?: string[];
   musicGenerationProviderIds?: string[];
   toolNames?: string[];
-  requireSpeechVoices?: boolean;
-  requireDescribeImages?: boolean;
-  requireGenerateImage?: boolean;
-  requireGenerateVideo?: boolean;
   manifestAuthChoice?: {
     pluginId: string;
     choiceId: string;
@@ -39,6 +40,7 @@ function findRegistration(pluginId: string) {
   return entry;
 }
 
+/** Installs tests that pin a bundled plugin's registered provider/tool ownership. */
 export function describePluginRegistrationContract(params: PluginRegistrationContractParams) {
   describe(`${params.pluginId} plugin registration contract`, () => {
     if (params.cliBackendIds) {
@@ -97,6 +99,14 @@ export function describePluginRegistrationContract(params: PluginRegistrationCon
       it("keeps bundled media-understanding ownership explicit", () => {
         expect(findRegistration(params.pluginId).mediaUnderstandingProviderIds).toEqual(
           params.mediaUnderstandingProviderIds,
+        );
+      });
+    }
+
+    if (params.transcriptSourceProviderIds) {
+      it("keeps bundled transcripts source ownership explicit", () => {
+        expect(findRegistration(params.pluginId).transcriptSourceProviderIds).toEqual(
+          params.transcriptSourceProviderIds,
         );
       });
     }

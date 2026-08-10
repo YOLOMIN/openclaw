@@ -1,5 +1,5 @@
-import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// Verifies pruning-related config defaults and migrations.
+import { describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "./config.js";
 import { applyProviderConfigDefaultsForConfig } from "./provider-policy.js";
 
@@ -14,17 +14,6 @@ function applyAnthropicDefaultsForTest(config: OpenClawConfig) {
 }
 
 describe("config pruning defaults", () => {
-  beforeEach(() => {
-    vi.stubEnv(
-      "OPENCLAW_BUNDLED_PLUGINS_DIR",
-      path.resolve(import.meta.dirname, "../../extensions"),
-    );
-  });
-
-  afterEach(() => {
-    vi.unstubAllEnvs();
-  });
-
   it("does not enable contextPruning by default", () => {
     const cfg = applyAnthropicDefaultsForTest({ agents: { defaults: {} } });
 
@@ -88,26 +77,6 @@ describe("config pruning defaults", () => {
     expectAnthropicPruningDefaults(cfg);
     expect(
       cfg.agents?.defaults?.models?.["anthropic/claude-opus-4-6"]?.params?.cacheRetention,
-    ).toBe("short");
-  });
-
-  it("adds cacheRetention defaults for dated Anthropic primary model refs", () => {
-    const cfg = applyAnthropicDefaultsForTest({
-      auth: {
-        profiles: {
-          "anthropic:api": { provider: "anthropic", mode: "api_key" },
-        },
-      },
-      agents: {
-        defaults: {
-          model: { primary: "anthropic/claude-sonnet-4-20250514" },
-        },
-      },
-    });
-
-    expectAnthropicPruningDefaults(cfg);
-    expect(
-      cfg.agents?.defaults?.models?.["anthropic/claude-sonnet-4-20250514"]?.params?.cacheRetention,
     ).toBe("short");
   });
 

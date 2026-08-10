@@ -1,3 +1,9 @@
+/**
+ * Subagent registry cleanup decisions.
+ *
+ * Decides whether completed runs can be cleaned up, deferred for descendants, retried, or abandoned.
+ */
+import { getDeliveryAttemptCount } from "./subagent-delivery-state.js";
 import {
   SUBAGENT_ENDED_REASON_COMPLETE,
   type SubagentLifecycleEndedReason,
@@ -11,7 +17,7 @@ type DeferredCleanupDecision =
     }
   | {
       kind: "give-up";
-      reason: "retry-limit" | "expiry";
+      reason: "expiry" | "permanent_failure";
       retryCount?: number;
     }
   | {
@@ -20,6 +26,7 @@ type DeferredCleanupDecision =
       resumeDelayMs?: number;
     };
 
+/** Resolve the lifecycle ended reason used when cleaning up a subagent run. */
 export function resolveCleanupCompletionReason(
   entry: SubagentRunRecord,
 ): SubagentLifecycleEndedReason {
@@ -27,16 +34,16 @@ export function resolveCleanupCompletionReason(
 }
 
 function resolveEndedAgoMs(entry: SubagentRunRecord, now: number): number {
-  return typeof entry.endedAt === "number" ? now - entry.endedAt : 0;
+  return typeof entry.execution.endedAt === "number" ? now - entry.execution.endedAt : 0;
 }
 
+/** Decide whether deferred subagent cleanup should retry, defer, or give up. */
 export function resolveDeferredCleanupDecision(params: {
   entry: SubagentRunRecord;
   now: number;
   activeDescendantRuns: number;
   announceExpiryMs: number;
   announceCompletionHardExpiryMs: number;
-  maxAnnounceRetryCount: number;
   deferDescendantDelayMs: number;
   resolveAnnounceRetryDelayMs: (retryCount: number) => number;
 }): DeferredCleanupDecision {
@@ -51,21 +58,28 @@ export function resolveDeferredCleanupDecision(params: {
     return { kind: "defer-descendants", delayMs: params.deferDescendantDelayMs };
   }
 
-  const retryCount = (params.entry.announceRetryCount ?? 0) + 1;
+  const retryCount = getDeliveryAttemptCount(params.entry) + 1;
   const expiryExceeded = isCompletionMessageFlow
     ? completionHardExpiryExceeded
     : endedAgo > params.announceExpiryMs;
-  if (retryCount >= params.maxAnnounceRetryCount || expiryExceeded) {
+  if (params.entry.delivery?.disposition === "permanent_failure" || expiryExceeded) {
     return {
       kind: "give-up",
-      reason: retryCount >= params.maxAnnounceRetryCount ? "retry-limit" : "expiry",
+      reason:
+        params.entry.delivery?.disposition === "permanent_failure" ? "permanent_failure" : "expiry",
       retryCount,
     };
   }
 
+  const persistedNextAttemptAt = params.entry.delivery?.nextAttemptAt;
+  const nextAttemptAt =
+    typeof persistedNextAttemptAt === "number" && persistedNextAttemptAt > params.now
+      ? persistedNextAttemptAt
+      : params.now + params.resolveAnnounceRetryDelayMs(retryCount);
+
   return {
     kind: "retry",
     retryCount,
-    resumeDelayMs: params.resolveAnnounceRetryDelayMs(retryCount),
+    resumeDelayMs: nextAttemptAt - params.now,
   };
 }

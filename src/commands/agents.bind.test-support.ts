@@ -1,3 +1,4 @@
+// Agent binding test support centralizes mocked channel plugin registries and lazy imports.
 import type { Mock } from "vitest";
 import { vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -33,10 +34,9 @@ vi.mock("../config/config.js", () => ({
   replaceConfigFile: (...args: unknown[]) => replaceConfigFileMock(...args),
 }));
 
-vi.mock("./agents.command-shared.js", () => ({
-  createQuietRuntime: <T>(runtime: T) => runtime,
-  requireValidConfig: async () => {
-    const snapshot = (await readConfigFileSnapshotMock()) as
+vi.mock("./config-validation.js", () => ({
+  requireValidConfigSnapshot: async (_runtime: unknown, opts?: unknown) => {
+    const snapshot = (await readConfigFileSnapshotMock(opts)) as
       | { config?: OpenClawConfig; sourceConfig?: OpenClawConfig }
       | undefined;
     return snapshot?.sourceConfig ?? snapshot?.config ?? null;
