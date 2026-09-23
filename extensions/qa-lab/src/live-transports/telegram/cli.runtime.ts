@@ -1,6 +1,7 @@
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { parseStrictPositiveInteger } from "openclaw/plugin-sdk/number-runtime";
 import type { LiveTransportQaCommandOptions } from "openclaw/plugin-sdk/qa-runtime";
 import type { QaGatewayChildCommand } from "../../gateway-child.js";
@@ -141,6 +142,7 @@ type TelegramQaSuiteOptions = LiveTransportQaCommandOptions & {
   resolvedScenarioIds?: readonly string[];
   roundTripProbe?: QaSuiteRoundTripProbe;
   sutOpenClawCommand?: QaGatewayChildCommand;
+  mutateConfig?: (cfg: OpenClawConfig) => OpenClawConfig;
 };
 
 export async function runQaTelegramSuite(opts: TelegramQaSuiteOptions) {
@@ -177,6 +179,7 @@ export async function runQaTelegramSuite(opts: TelegramQaSuiteOptions) {
     ],
     adapterOptions: {
       repoRoot: runOptions.repoRoot,
+      ...(runOptions.credentialFile ? { credentialFile: runOptions.credentialFile } : {}),
       ...(runOptions.credentialRole ? { credentialRole: runOptions.credentialRole } : {}),
       ...(runOptions.credentialSource ? { credentialSource: runOptions.credentialSource } : {}),
       ...(runOptions.sutAccountId ? { sutAccountId: runOptions.sutAccountId } : {}),
@@ -194,6 +197,7 @@ export async function runQaTelegramSuite(opts: TelegramQaSuiteOptions) {
     roundTripProbe: opts.roundTripProbe,
     scenarioIds,
     sutOpenClawCommand: opts.sutOpenClawCommand,
+    mutateConfig: opts.mutateConfig,
   });
   printLiveTransportQaArtifacts("Telegram QA", {
     report: result.reportPath,

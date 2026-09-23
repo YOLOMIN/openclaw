@@ -1,9 +1,7 @@
 import { html, nothing, type TemplateResult } from "lit";
 import { t } from "../../i18n/index.ts";
-import { BOARD_GRID_GAP, BOARD_GRID_ROW_HEIGHT } from "../../lib/board/grid.ts";
-import type { BoardWidgetAppViewState, BoardViewWidget } from "../../lib/board/view-types.ts";
-
-const GRANT_NOTICE_HEIGHT_PX = 112;
+import type { BoardWidget } from "../../lib/board/types.ts";
+import type { BoardWidgetAppViewState } from "../../lib/board/view-types.ts";
 
 type BoardMcpAppContentOptions = {
   accessNotice: TemplateResult | typeof nothing;
@@ -12,9 +10,8 @@ type BoardMcpAppContentOptions = {
   busy: boolean;
   loading: boolean;
   nearVisible: boolean;
-  rectHeight: number;
   sessionKey: string;
-  widget: BoardViewWidget;
+  widget: BoardWidget;
   expired: () => void;
   remove: () => void;
   retry: () => void;
@@ -22,17 +19,6 @@ type BoardMcpAppContentOptions = {
 
 export function renderBoardMcpAppContent(options: BoardMcpAppContentOptions): TemplateResult {
   const { appView, widget } = options;
-  const noticeHeight =
-    widget.grantState === "pending" || widget.grantState === "rejected"
-      ? GRANT_NOTICE_HEIGHT_PX
-      : 0;
-  const height = Math.max(
-    160,
-    options.rectHeight * BOARD_GRID_ROW_HEIGHT +
-      Math.max(0, options.rectHeight - 1) * BOARD_GRID_GAP -
-      38 -
-      noticeHeight,
-  );
   const ready =
     appView?.status === "ready" && appView.expiresAtMs > Date.now() ? appView : undefined;
   const loading = html`<div class="board-widget__app-loading" data-test-id="board-mcp-app-loading">
@@ -44,8 +30,7 @@ export function renderBoardMcpAppContent(options: BoardMcpAppContentOptions): Te
           class="board-widget__mcp-app-view"
           .sessionKey=${options.sessionKey}
           .viewId=${ready.viewId}
-          .height=${height}
-          .fixedHeight=${true}
+          .fillContainer=${true}
           .title=${widget.title || widget.name}
           @openclaw-mcp-app-view-expired=${options.expired}
         ></mcp-app-view>`

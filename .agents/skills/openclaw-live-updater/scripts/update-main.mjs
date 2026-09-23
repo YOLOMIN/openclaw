@@ -3,9 +3,14 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
+  readSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -35,7 +40,6 @@ import {
   resolveRuntimePostBuildRequirement,
 } from "../../../../scripts/run-node.mts";
 
-const DEFAULT_CHECKOUT = "/Users/steipete/openclaw";
 const DEFAULT_EXPECTED_ORIGIN = "openclaw/openclaw";
 const FULL_SHA_RE = /^[0-9a-f]{40}$/u;
 const GATEWAY_READINESS_ATTEMPTS = 7;
@@ -260,6 +264,47 @@ function gatewayCliOperation(args) {
     return "gateway.health";
   }
   return "gateway.cli";
+}
+
+function isLegacyGatewaySuspendPrepareParamsError(error) {
+  if (
+    !(error instanceof UpdateCommandError) ||
+    error.operation !== "gateway.suspend.prepare" ||
+    error.status !== 1
+  ) {
+    return false;
+  }
+  const cause = ownDataProperty(error, "cause");
+  const stdout = ownDataProperty(cause, "stdout");
+  if (typeof stdout !== "string" || !stdout.trim()) {
+    return false;
+  }
+  let payload;
+  try {
+    payload = JSON.parse(stdout.trim());
+  } catch {
+    return false;
+  }
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    Array.isArray(payload) ||
+    Object.keys(payload).length !== 2 ||
+    payload.ok !== false
+  ) {
+    return false;
+  }
+  const requestError = payload.error;
+  return (
+    typeof requestError === "object" &&
+    requestError !== null &&
+    !Array.isArray(requestError) &&
+    Object.keys(requestError).length === 4 &&
+    requestError.type === "gateway_request_error" &&
+    requestError.code === "INVALID_REQUEST" &&
+    requestError.message === "invalid gateway.suspend.prepare params" &&
+    requestError.retryable === false
+  );
 }
 
 async function runUpdateCommand(runCommand, operation, command, args, checkout, options) {
@@ -1263,7 +1308,37 @@ export function resolveLaunchAgentExitTimeoutSeconds(value) {
 
 function isLaunchctlServiceMissing(result) {
   const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-  return result.status !== 0 && /could not find service|no such process|not found/iu.test(output);
+  // Partial output from a killed or failed query cannot establish absence.
+  return (
+    Number.isInteger(result.status) &&
+    result.status !== 0 &&
+    !result.error &&
+    !result.signal &&
+    /could not find service|no such process|not found/iu.test(output)
+  );
+}
+
+function readLaunchDaemonPlistBytes(plistPath) {
+  const limit = 1024 * 1024;
+  const fd = openSync(plistPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > limit) {
+      throw new Error("LaunchDaemon plist must be a regular file of at most 1 MiB");
+    }
+    const bytes = Buffer.alloc(limit + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const count = readSync(fd, bytes, length, bytes.length - length, null);
+      if (count === 0) {
+        return bytes.subarray(0, length);
+      }
+      length += count;
+    }
+    throw new Error("LaunchDaemon plist exceeds 1 MiB");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function assertNoSystemLaunchDaemonOwnership(label, dependencies = {}) {
@@ -1306,27 +1381,42 @@ export function assertNoSystemLaunchDaemonOwnership(label, dependencies = {}) {
   }
   for (const entry of entries.filter((candidate) => candidate.endsWith(".plist")).toSorted()) {
     const plistPath = path.join(SYSTEM_LAUNCH_DAEMON_DIR, entry);
+    let bytes;
+    try {
+      bytes = readLaunchDaemonPlistBytes(plistPath);
+    } catch (error) {
+      // Same unreadable-file policy as the CLI: actual read errno, never a
+      // parser diagnostic or filename, admits this visibility exception.
+      if (["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes(error?.code)) {
+        continue;
+      }
+      throw new UpdateInvariantError(
+        "gateway_system_launchdaemon_unverifiable",
+        `could not read system LaunchDaemon plist ${plistPath}`,
+      );
+    }
+    // Extract only the exact string Label: valid vendor metadata can contain
+    // date/data scalars that whole-plist JSON cannot represent.
+    const options = boundedSyncOptions({ encoding: "utf8", input: bytes, maxBuffer: 1024 * 1024 });
     const result = run(
       "/usr/bin/plutil",
-      ["-convert", "json", "-o", "-", "--", plistPath],
-      boundedSyncOptions({ encoding: "utf8" }),
+      ["-extract", "Label", "raw", "-expect", "string", "-n", "-o", "-", "--", "-"],
+      options,
     );
-    if (result.status !== 0) {
+    if (result.status !== 0 || result.error || result.signal) {
+      const lint =
+        Number.isInteger(result.status) && !result.error && !result.signal
+          ? run("/usr/bin/plutil", ["-lint", "--", "-"], options)
+          : undefined;
+      if (lint?.status === 0 && !lint.error && !lint.signal) {
+        continue;
+      }
       throw new UpdateInvariantError(
         "gateway_system_launchdaemon_unverifiable",
         `could not inspect system LaunchDaemon plist ${plistPath}`,
       );
     }
-    let plist;
-    try {
-      plist = JSON.parse(String(result.stdout));
-    } catch {
-      throw new UpdateInvariantError(
-        "gateway_system_launchdaemon_unverifiable",
-        `could not inspect system LaunchDaemon plist ${plistPath}`,
-      );
-    }
-    if (plist?.Label === label) {
+    if (result.stdout === label) {
       throw new UpdateInvariantError(
         "gateway_system_launchdaemon_conflict",
         `System LaunchDaemon plist ${plistPath} already owns the managed Gateway label`,
@@ -1845,8 +1935,8 @@ export function runBuiltGatewayCall(checkout, method, params, deployment) {
 
 /**
  * @param {string} checkout
- * @param {(checkout: string, method: string, params: { requestId: string }, deployment: GatewayDeploymentRef | null) => string} [callGateway]
- * @param {GatewayDeploymentRef | null} [deployment]
+ * @param {(checkout: string, method: string, params: { requestId: string, terminalPolicy?: "terminate" }, deployment: GatewayCliDeployment | null) => string} [callGateway]
+ * @param {GatewayCliDeployment | null} [deployment]
  */
 export function prepareGatewaySuspension(
   checkout,
@@ -1854,11 +1944,20 @@ export function prepareGatewaySuspension(
   deployment = null,
 ) {
   const requestId = `openclaw-live-updater-${randomUUID()}`;
+  const callPrepare = (params) =>
+    JSON.parse(callGateway(checkout, "gateway.suspend.prepare", params, deployment));
   let result;
   try {
-    result = JSON.parse(
-      callGateway(checkout, "gateway.suspend.prepare", { requestId }, deployment),
-    );
+    try {
+      result = callPrepare({ requestId, terminalPolicy: "terminate" });
+    } catch (error) {
+      if (!isLegacyGatewaySuspendPrepareParamsError(error)) {
+        throw error;
+      }
+      // Older closed schemas reject the new field before acquiring a lease.
+      // Retry once with preserve semantics so mixed-version updates remain safe.
+      result = callPrepare({ requestId });
+    }
   } catch (error) {
     throw new UpdateInvariantError(
       "gateway_suspend_prepare_failed",
@@ -2329,19 +2428,14 @@ async function bootstrapManagedGateway(runCommand, checkout, deployment, options
         timeoutMs: COMMAND_TIMEOUT_MS.gatewayService,
       },
     );
-    await runUpdateCommand(
+    await bootstrapLaunchAgentAndWait(
       runCommand,
-      "launchd.bootstrap",
-      "/bin/launchctl",
-      ["bootstrap", domain, deployment.plistPath],
       checkout,
-      {
-        phase: "Gateway LaunchAgent bootstrap",
-        serviceState: "stopped",
-        timeoutMs: COMMAND_TIMEOUT_MS.gatewayService,
-      },
+      deployment,
+      domain,
+      waitForProcess,
+      options.sleep ?? defaultSleep,
     );
-    await waitForProcess(deployment, options.sleep ?? defaultSleep);
     return { processStartedAt: timestampAt(now) };
   }
 
@@ -2376,19 +2470,14 @@ async function bootstrapManagedGateway(runCommand, checkout, deployment, options
         timeoutMs: COMMAND_TIMEOUT_MS.gatewayService,
       },
     );
-    await runUpdateCommand(
+    await bootstrapLaunchAgentAndWait(
       runCommand,
-      "launchd.bootstrap",
-      "/bin/launchctl",
-      ["bootstrap", domain, deployment.plistPath],
       checkout,
-      {
-        phase: "Gateway LaunchAgent bootstrap",
-        serviceState: "stopped",
-        timeoutMs: COMMAND_TIMEOUT_MS.gatewayService,
-      },
+      deployment,
+      domain,
+      waitForProcess,
+      options.sleep ?? defaultSleep,
     );
-    await waitForProcess(deployment, options.sleep ?? defaultSleep);
     processStartedAt = timestampAt(now);
   } catch (error) {
     restartError = error;
@@ -2428,6 +2517,41 @@ async function bootstrapManagedGateway(runCommand, checkout, deployment, options
     throwPreservingValue(restartError);
   }
   return { processStartedAt };
+}
+
+async function bootstrapLaunchAgentAndWait(
+  runCommand,
+  checkout,
+  deployment,
+  domain,
+  waitForProcess,
+  sleep,
+) {
+  try {
+    await runUpdateCommand(
+      runCommand,
+      "launchd.bootstrap",
+      "/bin/launchctl",
+      ["bootstrap", domain, deployment.plistPath],
+      checkout,
+      {
+        phase: "Gateway LaunchAgent bootstrap",
+        serviceState: "stopped",
+        timeoutMs: COMMAND_TIMEOUT_MS.gatewayService,
+      },
+    );
+  } catch (bootstrapError) {
+    if (findUnsafeCommandCleanupFailure(bootstrapError)) {
+      throwPreservingValue(bootstrapError);
+    }
+    try {
+      await waitForProcess(deployment, sleep);
+      return;
+    } catch {
+      throwPreservingValue(bootstrapError);
+    }
+  }
+  await waitForProcess(deployment, sleep);
 }
 
 function armLaunchdEnvironmentRestore(name, previousValue) {
@@ -2722,7 +2846,7 @@ function defaultSleep(ms) {
 }
 
 /**
- * @param {(command: string, args: string[], checkout: string, options?: Record<string, unknown>) => unknown | Promise<unknown>} runCommand
+ * @param {(command: string, args: string[], checkout: string, options?: Record<string, unknown>) => void | Promise<void>} runCommand
  * @param {string} checkout
  * @param {string} expectedSha
  * @param {(ms: number) => void | Promise<void>} [sleep]
@@ -2761,7 +2885,7 @@ export async function verifyGatewayReadiness(
   for (let attempt = 1; attempt <= GATEWAY_READINESS_ATTEMPTS; attempt += 1) {
     try {
       if (deployment) {
-        markGatewayMilestones(timing, await probeMilestones(deployment), timestampAt(now));
+        markGatewayMilestones(timing, probeMilestones(deployment), timestampAt(now));
       }
       const deepRpcReadyAt = await verifyGatewayDeepRpc(
         runCommand,
@@ -2774,7 +2898,7 @@ export async function verifyGatewayReadiness(
       if (deployment) {
         markGatewayMilestones(
           timing,
-          await probeMilestones(deployment),
+          probeMilestones(deployment),
           timestampAt(now),
           deepRpcReadyAt,
         );
@@ -3725,7 +3849,7 @@ export async function maintainMain(options, dependencies = {}) {
 }
 
 function parseArgs(argv) {
-  const options = { checkout: DEFAULT_CHECKOUT, remote: "origin" };
+  const options = { checkout: process.cwd(), remote: "origin" };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--checkout") {

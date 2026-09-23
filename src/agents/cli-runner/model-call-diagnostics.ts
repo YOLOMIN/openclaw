@@ -22,7 +22,7 @@ import {
   createDiagnosticTraceContextFromActiveScope,
   freezeDiagnosticTraceContext,
 } from "../../infra/diagnostic-trace-context.js";
-import type { CliOutput, CliUsage } from "../cli-output.js";
+import type { CliOutput, CliUsage } from "../cli-output-contracts.js";
 import { isFailoverError } from "../failover-error.js";
 import type { PreparedCliRunContext } from "./types.js";
 
@@ -351,6 +351,7 @@ export function createClaudeCliModelCallDiagnostics(params: {
   const trace = freezeDiagnosticTraceContext(createDiagnosticTraceContextFromActiveScope());
   const baseFields = {
     runId: params.context.params.runId,
+    ...(params.context.params.agentId ? { agentId: params.context.params.agentId } : {}),
     callId: `${params.context.params.runId}:claude-cli:${crypto.randomUUID()}`,
     ...(params.context.params.sessionKey ? { sessionKey: params.context.params.sessionKey } : {}),
     sessionId: params.context.params.sessionId,

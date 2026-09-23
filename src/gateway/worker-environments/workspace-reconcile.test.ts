@@ -9,7 +9,11 @@ import type {
   WorkerWorkspaceManifest,
   WorkerWorkspaceManifestEntry,
 } from "./workspace-manifest.js";
-import { serializeWorkerWorkspaceManifest } from "./workspace-manifest.js";
+import {
+  MAX_RECONCILIATION_ENTRIES,
+  parseWorkerWorkspaceReconciliationPlan,
+  serializeWorkerWorkspaceManifest,
+} from "./workspace-manifest.js";
 import {
   applyStagedWorkerWorkspace,
   type WorkerWorkspaceReconciliationJournal,
@@ -110,7 +114,7 @@ async function applyWorkspace(params: {
     ...params,
     baseManifestRef: `sha256:${"a".repeat(64)}`,
     currentManifestRef: `sha256:${"b".repeat(64)}`,
-    publishAcceptedManifest: params.publishAcceptedManifest,
+    acceptance: { kind: "reconcile", publish: params.publishAcceptedManifest },
     journal: {
       load: () => pending,
       begin: (journal) => {
@@ -190,7 +194,7 @@ describe("worker workspace reconciliation", () => {
     }
   });
 
-  it("applies the complete candidate before publishing its recovery ref", async () => {
+  it("applies the candidate before publishing its recovery ref", async () => {
     const local = await temporaryDirectory("workspace-staged-ref-local");
     const payload = await temporaryDirectory("workspace-staged-ref-payload");
     const complete = await temporaryDirectory("workspace-staged-ref-complete");
@@ -302,6 +306,28 @@ describe("worker workspace reconciliation", () => {
         })
       ).code,
     ).not.toBe(0);
+  });
+
+  it("rejects a persisted journal above the combined inventory record budget", () => {
+    expect(() =>
+      parseWorkerWorkspaceReconciliationPlan(
+        JSON.stringify({
+          version: 1,
+          temporaryNonce: "a".repeat(32),
+          baseManifestRef: `sha256:${"a".repeat(64)}`,
+          currentManifestRef: `sha256:${"b".repeat(64)}`,
+          baseEntries: [],
+          appliedEntries: [],
+          baseDirectories: Array.from(
+            { length: MAX_RECONCILIATION_ENTRIES + 1 },
+            (_, index) => `directory-${index}`,
+          ),
+          appliedDirectories: [],
+          baseTree: "b".repeat(40),
+          basePackSha256: "c".repeat(64),
+        }),
+      ),
+    ).toThrow("unsupported shape");
   });
 
   it("preserves the published result when its fence-row update fails", async () => {
@@ -423,10 +449,13 @@ describe("worker workspace reconciliation", () => {
     });
 
     expect(cleanupRef).toBe(cleanupWorkerWorkspaceResultRef(stagedResultRef));
-    await deleteWorkerWorkspaceResultCleanupRefs({
+    const retainedRefs = new Set<string>();
+    const cleanup = deleteWorkerWorkspaceResultCleanupRefs({
       root: local,
-      retainedRefs: new Set([cleanupRef]),
+      retainedRefs: () => retainedRefs,
     });
+    retainedRefs.add(cleanupRef);
+    await cleanup;
     await expect(
       hasWorkerWorkspaceResultRef({ root: local, stagedResultRef: cleanupRef }),
     ).resolves.toBe(true);
@@ -589,6 +618,7 @@ describe("worker workspace reconciliation", () => {
   it("applies changed, added, deleted, executable, binary, and symlink results", async () => {
     const local = await temporaryDirectory("workspace-local");
     const staged = await temporaryDirectory("workspace-staged");
+    const addedName = process.platform === "win32" ? "added.txt" : "added\u0001-é.txt";
     await gitInit(local);
     await fs.mkdir(path.join(local, "src"));
     await fs.writeFile(path.join(local, "keep.bin"), Buffer.from([0, 1, 2]));
@@ -598,10 +628,10 @@ describe("worker workspace reconciliation", () => {
 
     await fs.mkdir(path.join(staged, "src"));
     await fs.writeFile(path.join(staged, "keep.bin"), Buffer.from([0, 9, 2]));
-    await fs.writeFile(path.join(staged, "added.txt"), "new");
+    await fs.writeFile(path.join(staged, addedName), "new");
     await fs.writeFile(path.join(staged, "src", "script.sh"), "after");
     await fs.chmod(path.join(staged, "src", "script.sh"), 0o755);
-    await fs.symlink("added.txt", path.join(staged, "link.txt"));
+    await fs.symlink(addedName, path.join(staged, "link.txt"));
     const current = await manifestFor(staged);
 
     await applyWorkspace({ root: local, stagingRoot: staged, base, current });
@@ -609,9 +639,9 @@ describe("worker workspace reconciliation", () => {
     await expect(fs.readFile(path.join(local, "keep.bin"))).resolves.toEqual(
       Buffer.from([0, 9, 2]),
     );
-    await expect(fs.readFile(path.join(local, "added.txt"), "utf8")).resolves.toBe("new");
+    await expect(fs.readFile(path.join(local, addedName), "utf8")).resolves.toBe("new");
     await expect(fs.access(path.join(local, "delete.txt"))).rejects.toThrow();
-    await expect(fs.readlink(path.join(local, "link.txt"))).resolves.toBe("added.txt");
+    await expect(fs.readlink(path.join(local, "link.txt"))).resolves.toBe(addedName);
     expect((await fs.stat(path.join(local, "src", "script.sh"))).mode & 0o111).not.toBe(0);
   });
 
@@ -894,7 +924,7 @@ describe("worker workspace reconciliation", () => {
     const staged = await temporaryDirectory("workspace-directory-delete-derived-staged");
     await fs.mkdir(path.join(local, "removed", "nested"), { recursive: true });
     await fs.writeFile(path.join(local, "removed", "nested", "base.txt"), "base");
-    const base = await manifestFor(local);
+    const base = { ...(await manifestFor(local)), baseCommit: "a".repeat(40) };
     await fs.mkdir(path.join(local, "removed", "nested", "__pycache__"));
     await fs.writeFile(
       path.join(local, "removed", "nested", "__pycache__", "cache.pyc"),
@@ -905,7 +935,7 @@ describe("worker workspace reconciliation", () => {
       root: local,
       stagingRoot: staged,
       base,
-      current: await manifestFor(staged),
+      current: { ...(await manifestFor(staged)), baseCommit: "a".repeat(40) },
     });
 
     expect(applied.conflictPaths).toEqual([]);
