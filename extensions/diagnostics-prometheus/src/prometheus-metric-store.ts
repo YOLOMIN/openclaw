@@ -1,4 +1,4 @@
-import { metricKey, type LabelSet } from "./prometheus-format.js";
+import { formatLabels, metricKey, type LabelSet } from "./prometheus-format.js";
 
 type ScalarSample = {
   help: string;
@@ -8,10 +8,11 @@ type ScalarSample = {
 
 type HistogramSample = {
   buckets: number[];
+  bucketPrefixes: string[];
   counts: number[];
   count: number;
   help: string;
-  labels: LabelSet;
+  labels: string;
   sum: number;
 };
 
@@ -67,6 +68,16 @@ export function createPrometheusMetricStore() {
     gauges.set(key, { help, labels, value });
   };
 
+  const counterValue = (name: string, help: string, labels: LabelSet, value: number) => {
+    if (!Number.isFinite(value) || value < 0) {
+      return;
+    }
+    const key = metricKey(name, labels);
+    if (canCreateSeries(counters, key)) {
+      counters.set(key, { help, labels, value: Math.max(counters.get(key)?.value ?? 0, value) });
+    }
+  };
+
   const clearGauges = (name: string) => {
     for (const key of gauges.keys()) {
       if (key.startsWith(`${name}|`)) {
@@ -82,7 +93,7 @@ export function createPrometheusMetricStore() {
     value: number | undefined,
     buckets = DURATION_BUCKETS_SECONDS,
   ) => {
-    if (value === undefined || !Number.isFinite(value) || value < 0) {
+    if (value === undefined || !Number.isFinite(value)) {
       return;
     }
     const key = metricKey(name, labels);
@@ -93,10 +104,14 @@ export function createPrometheusMetricStore() {
     if (!sample) {
       sample = {
         buckets,
+        // Labels and bounds are fixed for this series; reset releases the prepared text.
+        bucketPrefixes: [...buckets, "+Inf"].map(
+          (le) => `${name}_bucket${formatLabels({ ...labels, le: String(le) })} `,
+        ),
         counts: buckets.map(() => 0),
         count: 0,
         help,
-        labels,
+        labels: formatLabels(labels),
         sum: 0,
       };
       histograms.set(key, sample);
@@ -137,5 +152,5 @@ export function createPrometheusMetricStore() {
     droppedSeries = 0;
   };
 
-  return { counter, gauge, clearGauges, histogram, reset, snapshot };
+  return { counter, counterValue, gauge, clearGauges, histogram, reset, snapshot };
 }
