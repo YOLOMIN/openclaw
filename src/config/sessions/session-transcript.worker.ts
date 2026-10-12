@@ -21,7 +21,7 @@ import {
   pruneClosedHistoryDatabaseScopes,
 } from "./session-transcript-worker-scopes.js";
 import type {
-  SessionTranscriptWorkerInput,
+  SessionTranscriptWorkerRequest,
   SessionTranscriptWorkerReply,
   SessionTranscriptWorkerValues,
 } from "./session-transcript-worker.types.js";
@@ -42,7 +42,7 @@ serveOwnedWorkerTasks(
     releaseReadValidation ??= (await import("../../state/openclaw-agent-db-validation-cache.js"))
       .releaseOpenClawAgentDatabaseReadValidation;
     // SAFETY: The paired runtime constructs this request; the SQLite snapshot validates admission.
-    const request = input as SessionTranscriptWorkerInput | UsageCostWorkerInput;
+    const request = input as SessionTranscriptWorkerRequest | UsageCostWorkerInput;
     if (request.kind === "cli-process-history") {
       if (!channel) {
         throw new Error("Process-held history requires its host reader channel");
@@ -217,6 +217,21 @@ serveOwnedWorkerTasks(
           pending: result.found && result.value,
         };
       }
+      if (request.kind === "session-transcript-instances") {
+        const { listSessionTranscriptInstances } = await import("./session-history.js");
+        return {
+          kind: request.kind,
+          instances: listSessionTranscriptInstances(
+            {
+              ...request.scope,
+              storePath: request.database.path,
+              env: cloneEnvWithPlatformSemantics(request.scope.env ?? process.env),
+            },
+            request.options,
+            request.continuation,
+          ),
+        };
+      }
       if (request.kind === "memory-session-targets") {
         const { readMemorySessionTargets } = await import("./session-memory-targets.js");
         return {
@@ -295,6 +310,11 @@ serveOwnedWorkerTasks(
         }
         return read.value;
       }
+      if (request.kind === "session-retirement-read") {
+        const { readSessionRetirementInWorker } =
+          await import("./session-retirement-read.worker.js");
+        return { kind: request.kind, result: readSessionRetirementInWorker(request) };
+      }
       if (request.kind === "session-exact-entries") {
         const { readExactSessionEntriesWithLifecycle } =
           await import("./session-entry-read.worker.js");
@@ -337,6 +357,11 @@ serveOwnedWorkerTasks(
           await import("./session-store-target-inventory.js");
         return readSessionStoreTargetInventory(request.request);
       }
+      if (request.kind === "combined-store-topology") {
+        const { readCombinedSessionStoreTopology } =
+          await import("./combined-store-topology.worker.js");
+        return readCombinedSessionStoreTopology(request.request);
+      }
       if (request.kind === "session-identity-evidence") {
         const { withOpenClawAgentDatabaseReadOnly } =
           await import("../../state/openclaw-agent-db-readonly.js");
@@ -369,7 +394,7 @@ serveOwnedWorkerTasks(
         return readSessionEntryWorkerRequest(request);
       }
       if (request.kind === "session-entry-list") {
-        const { readSessionEntryList } = await import("./session-entry-read.worker.js");
+        const { readSessionEntryList } = await import("./session-entry-list.worker.js");
         return {
           kind: "session-entry-list" as const,
           ...readSessionEntryList(request),
@@ -510,11 +535,9 @@ serveOwnedWorkerTasks(
       if (request.kind === "goal-operation-receipt") {
         const { withOpenClawAgentDatabaseReadOnly } =
           await import("../../state/openclaw-agent-db-readonly.js");
-        const {
-          assertSessionGoalOperationTime,
-          readSessionGoalOperationInDatabase,
-          SessionGoalOperationError,
-        } = await import("./goals-operations.js");
+        const { readSessionGoalOperationInDatabase, SessionGoalOperationError } =
+          await import("./goals-operations.js");
+        const { assertSessionGoalOperationTime } = await import("./goals-operation-policy.js");
         try {
           assertSessionGoalOperationTime(request.operation, Date.now());
           const result = withOpenClawAgentDatabaseReadOnly(
@@ -620,6 +643,7 @@ serveOwnedWorkerTasks(
                 : `history.${request.request.kind}`
               : request.kind,
             readRequest,
+            request.validation,
           )
         : { ok: true, value: await readRequest() };
     } catch (error) {

@@ -228,7 +228,6 @@ export {
 } from "./session-accessor.reset.js";
 export {
   appendTranscriptEvent,
-  appendTranscriptEventSync,
   appendTranscriptMessage,
   appendTranscriptMessageSync,
   findTranscriptEvent,
@@ -248,7 +247,6 @@ export {
   readTranscriptEventAtSeqSync,
   readPreviousIndexedTranscriptEventSync,
   readTranscriptIdentityByEventId,
-  readSessionTranscriptMessageByEventId,
   readTranscriptRawDelta,
   readTranscriptMutationAtSync,
   readTranscriptMutationStateSync,
@@ -256,8 +254,6 @@ export {
   readTranscriptStatsBatchReadOnlySync,
   readTranscriptStatsSync,
   validatePreparedAssistantAppendSync,
-  replaceTranscriptEvents,
-  replaceTranscriptEventsSync,
   replaceSessionWithBranchedTranscript,
   replaceTranscriptSuffixEventsSync,
   rewriteTranscriptEventRowsExact,
@@ -266,6 +262,7 @@ export {
   resolveTranscriptSessionKeyBySessionId,
   trimSessionTranscriptForManualCompact,
   withTranscriptWriteLock,
+  withTranscriptWriteSequence,
   withTranscriptWriteTransaction,
 } from "./session-accessor.transcript.js";
 export {

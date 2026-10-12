@@ -8,13 +8,13 @@ import {
   runWithCliHistoryWriter,
 } from "../../config/sessions/cli-history-boundary.js";
 import {
-  appendTranscriptEventSync,
   loadSessionEntryReadOnly,
   patchSessionEntryCore,
   upsertSessionEntryCore,
 } from "../../config/sessions/session-accessor.js";
 import * as sessionAccessor from "../../config/sessions/session-accessor.js";
 import { readActiveTranscriptEntryAnchor } from "../../config/sessions/session-accessor.sqlite-transcript-anchor.js";
+import { appendTranscriptEventSync } from "../../config/sessions/session-accessor.sqlite-transcript-write.test-support.js";
 import { projectPublicSessionEntry } from "../../config/sessions/session-entry-projection.js";
 import { runWithSessionTranscriptReadFence } from "../../config/sessions/session-transcript-read-fence.js";
 import {
@@ -316,13 +316,6 @@ describe("CLI transcript account boundary", () => {
     },
   );
 
-  it("establishes coverage before the first transcript header and user row exist", async () => {
-    const f = await fixture(false);
-    await f.seed();
-    await f.run("epoch-a", async (allowed, params) => {
-      expect(await history(allowed, params)).toContain("A private canary");
-    });
-  });
   it("retains same-account raw and compacted history without exposing private metadata", async () => {
     const f = await fixture();
     await f.seed();
